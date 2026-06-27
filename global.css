@@ -1,0 +1,151 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+@import "nativewind/theme";
+
+@theme {
+  /* ── Brand ──────────────────────────────── */
+  --color-hula-purple: #8A6CFF;
+  --color-hula-iris:   #6F5BFF;
+  --color-hula-sky:    #5CA8FF;
+  --color-hula-mint:   #3FD0A8;
+
+  /* ── Backgrounds ─────────────────────────── */
+  --color-background:        #0B1020;
+  --color-background-subtle: #10172E;
+  --color-background-muted:  #151D36;
+
+  /* ── Surfaces ────────────────────────────── */
+  --color-surface:          #1A2140;
+  --color-surface-elevated: #202946;
+  --color-surface-glass:    rgba(26, 33, 64, 0.72);
+
+  /* ── Borders ─────────────────────────────── */
+  --color-border:      #2A3350;
+  --color-border-glow: #6F5BFF;
+
+  /* ── Text ────────────────────────────────── */
+  --color-foreground:          #F6F8FF;
+  --color-muted-foreground:    #C2CAE0;
+  --color-subtle-foreground:   #8B93AA;
+  --color-disabled-foreground: #5B637C;
+
+  /* ── Semantic ────────────────────────────── */
+  --color-success:     #2ECC71;
+  --color-warning:     #F6C445;
+  --color-streak:      #FF9F43;
+  --color-destructive: #FF5D73;
+  --color-info:        #5CA8FF;
+
+  /* ── Font families (one per weight — RN requires this) ── */
+  --font-sans:      'Poppins_400Regular', sans-serif;
+  --font-sans-md:   'Poppins_500Medium',  sans-serif;
+  --font-sans-semi: 'Poppins_600SemiBold', sans-serif;
+  --font-sans-bold: 'Poppins_700Bold',    sans-serif;
+
+  /* ── Font sizes ──────────────────────────── */
+  --text-h1:      32px;
+  --text-h2:      24px;
+  --text-h3:      20px;
+  --text-h4:      16px;
+  --text-body-lg: 16px;
+  --text-body-md: 14px;
+  --text-body-sm: 13px;
+  --text-caption: 11px;
+
+  /* ── Line heights ─────────────────────────── */
+  --leading-h1:      38px;
+  --leading-h2:      31px;
+  --leading-h3:      26px;
+  --leading-h4:      22px;
+  --leading-body-lg: 26px;
+  --leading-body-md: 22px;
+  --leading-body-sm: 21px;
+  --leading-caption: 15px;
+
+  /* ── Radii ───────────────────────────────── */
+  --radius-sm:   12px;
+  --radius-md:   16px;
+  --radius-lg:   20px;
+  --radius-xl:   24px;
+  --radius-card: 28px;
+  --radius-pill: 999px;
+
+  /* ── Spacing ─────────────────────────────── */
+  --spacing-xs:  4px;
+  --spacing-sm:  8px;
+  --spacing-md:  12px;
+  --spacing-lg:  16px;
+  --spacing-xl:  24px;
+  --spacing-2xl: 32px;
+  --spacing-3xl: 40px;
+
+  /* ── Shadows ─────────────────────────────── */
+  --shadow-glow:   0px 0px 32px rgba(111, 91, 255, 0.40);
+  --shadow-card:   0px 4px 24px rgba(0, 0, 0, 0.50);
+  --shadow-subtle: 0px 2px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* ─────────────────────────────────────────────────────────
+   COMPONENT UTILITIES — BEM
+───────────────────────────────────────────────────────── */
+@layer utilities {
+  /* Glass Card */
+  .glass-card {
+    @apply bg-surface/40 border border-border rounded-card;
+  }
+  .glass-card--elevated {
+    @apply bg-surface-elevated/60 border border-border rounded-card;
+  }
+
+  /* Icon Tile */
+  .icon-tile {
+    @apply bg-surface/50 rounded-md overflow-hidden;
+  }
+
+  /* Bottom Nav */
+  .bottom-nav {
+    @apply bg-background/90 border-t border-border;
+  }
+
+  /* Elevated Panel */
+  .elevated-panel {
+    @apply bg-surface-elevated border border-border rounded-card;
+  }
+
+  /* Divider */
+  .divider {
+    @apply border-b border-border;
+  }
+
+  /* ── Typography compounds ─────────────────── */
+  .type-h1 {
+    @apply text-h1 leading-h1 font-sans-bold text-foreground;
+  }
+  .type-h2 {
+    @apply text-h2 leading-h2 font-sans-semi text-foreground;
+  }
+  .type-h3 {
+    @apply text-h3 leading-h3 font-sans-semi text-foreground;
+  }
+  .type-h4 {
+    @apply text-h4 leading-h4 font-sans-md text-foreground;
+  }
+  .type-body-lg {
+    @apply text-body-lg leading-body-lg font-sans text-foreground;
+  }
+  .type-body-md {
+    @apply text-body-md leading-body-md font-sans text-muted-foreground;
+  }
+  .type-body-sm {
+    @apply text-body-sm leading-body-sm font-sans text-muted-foreground;
+  }
+  .type-caption {
+    @apply text-caption leading-caption font-sans text-subtle-foreground;
+  }
+
+  /* Glow */
+  .glow-purple {
+    @apply shadow-glow;
+  }
+}
