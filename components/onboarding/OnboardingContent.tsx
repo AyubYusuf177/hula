@@ -1,8 +1,13 @@
+import { useSSO } from '@clerk/clerk-expo';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useState } from 'react';
+import * as Linking from 'expo-linking';
+import { useRouter } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
+import { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
@@ -20,9 +25,15 @@ import Animated, {
 
 import { hula } from '@/constants/theme';
 
+// Ensures the OAuth web browser session resolves back into the app (no-op on
+// warm launches). Must run at module scope, once.
+WebBrowser.maybeCompleteAuthSession();
+
 type Props = {
   progress: SharedValue<number>;
 };
+
+type BusyProvider = 'google' | 'apple' | null;
 
 const CLAMP = Extrapolation.CLAMP;
 const font = hula.typography.fontFamily;
@@ -35,6 +46,52 @@ const font = hula.typography.fontFamily;
 export function OnboardingContent({ progress }: Props) {
   const { width: W, height: H } = useWindowDimensions();
   const [interactive, setInteractive] = useState(false);
+
+  const router = useRouter();
+  const { startSSOFlow } = useSSO();
+  const [busy, setBusy] = useState<BusyProvider>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Warm up the in-app browser so the Google sheet opens instantly.
+  useEffect(() => {
+    void WebBrowser.warmUpAsync();
+    return () => {
+      void WebBrowser.coolDownAsync();
+    };
+  }, []);
+
+  const onGoogle = useCallback(async () => {
+    if (busy) return;
+    setAuthError(null);
+    setBusy('google');
+    try {
+      const { createdSessionId, setActive } = await startSSOFlow({
+        strategy: 'oauth_google',
+        redirectUrl: Linking.createURL('/'),
+      });
+      if (createdSessionId && setActive) {
+        // Session becomes active → the index gate redirects automatically.
+        await setActive({ session: createdSessionId });
+      }
+      // If there's no session id, the user cancelled — stay put silently.
+    } catch {
+      setAuthError('Google sign-in failed. Please try again.');
+    } finally {
+      setBusy(null);
+    }
+  }, [busy, startSSOFlow]);
+
+  const onApple = useCallback(() => {
+    // TODO: Apple sign-in needs Apple Developer + Clerk OAuth setup. Kept
+    // visible but inert so it never blocks Google/email.
+    setAuthError('Apple sign-in is coming soon.');
+  }, []);
+
+  const onEmail = useCallback(() => {
+    if (busy) return;
+    setAuthError(null);
+    router.push('/email');
+  }, [busy, router]);
 
   // Only let the auth card receive touches once it is essentially on screen.
   useAnimatedReaction(
@@ -148,12 +205,21 @@ export function OnboardingContent({ progress }: Props) {
             <SolidButton
               icon={<Ionicons name="logo-apple" size={24} color={hula.button.solidText} />}
               label="Continue with Apple"
+              onPress={onApple}
+              disabled={busy !== null}
             />
             <SolidButton
               icon={<GoogleG />}
               label="Continue with Google"
+              onPress={onGoogle}
+              loading={busy === 'google'}
+              disabled={busy !== null}
             />
-            <EmailButton />
+            <EmailButton onPress={onEmail} disabled={busy !== null} />
+
+            {authError ? (
+              <Text style={styles.errorText}>{authError}</Text>
+            ) : null}
 
             <Text style={styles.legalText}>
               By continuing, you agree to our
@@ -172,21 +238,53 @@ export function OnboardingContent({ progress }: Props) {
 
 /* ── Buttons ──────────────────────────────────────────────────── */
 
-function SolidButton({ icon, label }: { icon: React.ReactNode; label: string }) {
+function SolidButton({
+  icon,
+  label,
+  onPress,
+  loading = false,
+  disabled = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onPress?: () => void;
+  loading?: boolean;
+  disabled?: boolean;
+}) {
   return (
     <Pressable
-      style={({ pressed }) => [styles.solidButton, pressed && styles.pressed]}
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [
+        styles.solidButton,
+        pressed && styles.pressed,
+        disabled && !loading && styles.disabled,
+      ]}
     >
-      <View style={styles.buttonIcon}>{icon}</View>
+      <View style={styles.buttonIcon}>
+        {loading ? <ActivityIndicator size="small" color={hula.button.solidText} /> : icon}
+      </View>
       <Text style={styles.solidLabel}>{label}</Text>
     </Pressable>
   );
 }
 
-function EmailButton() {
+function EmailButton({
+  onPress,
+  disabled = false,
+}: {
+  onPress?: () => void;
+  disabled?: boolean;
+}) {
   return (
     <Pressable
-      style={({ pressed }) => [{ marginTop: hula.spacing.lg }, pressed && styles.pressed]}
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [
+        { marginTop: hula.spacing.lg },
+        pressed && styles.pressed,
+        disabled && styles.disabled,
+      ]}
     >
       <LinearGradient
         colors={[...hula.button.gradientBorder]}
@@ -306,6 +404,17 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.85,
+  },
+  disabled: {
+    opacity: 0.55,
+  },
+  errorText: {
+    fontFamily: font.medium,
+    fontSize: hula.typography.legal.fontSize,
+    lineHeight: hula.typography.legal.lineHeight,
+    color: '#FF9FB2',
+    textAlign: 'center',
+    marginTop: hula.spacing.lg,
   },
   legalText: {
     fontFamily: font.regular,
