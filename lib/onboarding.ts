@@ -61,3 +61,87 @@ export async function clearLegacyOnboardingFlag(): Promise<void> {
     // Non-fatal.
   }
 }
+
+/* ── Onboarding stage (Section 2 activation flow) ─────────────────────────
+ *
+ * `onboarding_complete` above is a single boolean gate. The *stage* is finer
+ * grained: it remembers exactly where a signed-in user is in the post-questions
+ * activation flow (checking subscription → all set → what happens next →
+ * paywall → free preview), so that signing out and back in resumes at the same
+ * screen instead of restarting from `/onboarding/legal`.
+ *
+ * Still client-only and always scoped to the current Clerk `userId`.
+ */
+
+export type OnboardingStage =
+  | 'questions'
+  | 'checking_subscription'
+  | 'all_set'
+  | 'what_happens_next'
+  | 'paywall'
+  | 'free_preview'
+  | 'preview_active'
+  | 'complete';
+
+const ONBOARDING_STAGES: readonly OnboardingStage[] = [
+  'questions',
+  'checking_subscription',
+  'all_set',
+  'what_happens_next',
+  'paywall',
+  'free_preview',
+  'preview_active',
+  'complete',
+];
+
+/** Narrow an unknown stored string to a valid stage (avoids unsafe casts). */
+function isOnboardingStage(value: string | null): value is OnboardingStage {
+  return value !== null && (ONBOARDING_STAGES as readonly string[]).includes(value);
+}
+
+/** The AsyncStorage key holding the current user's onboarding stage. */
+export function getOnboardingStageKey(userId: string): string {
+  return `onboarding_stage:${userId}`;
+}
+
+/**
+ * Reads the user's current stage, or `null` when there is no userId, nothing
+ * saved yet, an unrecognized value, or a read error — callers treat `null` as
+ * "not started, fall back to the questions flow".
+ */
+export async function getOnboardingStage(
+  userId: string | null | undefined,
+): Promise<OnboardingStage | null> {
+  if (!userId) return null;
+  try {
+    const value = await AsyncStorage.getItem(getOnboardingStageKey(userId));
+    return isOnboardingStage(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persists the user's current stage. A missing userId is a no-op. */
+export async function setOnboardingStage(
+  userId: string | null | undefined,
+  stage: OnboardingStage,
+): Promise<void> {
+  if (!userId) return;
+  try {
+    await AsyncStorage.setItem(getOnboardingStageKey(userId), stage);
+  } catch {
+    // Non-fatal: routing will fall back to an earlier stage.
+  }
+}
+
+/** Dev/debug helper: clears only the current user's stage. */
+export async function clearOnboardingStage(
+  userId: string | null | undefined,
+): Promise<void> {
+  if (!userId) return;
+  try {
+    await AsyncStorage.removeItem(getOnboardingStageKey(userId));
+  } catch {
+    // Non-fatal.
+  }
+}

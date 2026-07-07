@@ -1,0 +1,61 @@
+import { Image, Platform, StyleSheet, View } from 'react-native';
+
+import { hula } from '@/constants/theme';
+import { images } from '@/constants/images';
+
+type Props = {
+  /** Outer tile size in px (default 92, matching the mockups). */
+  size?: number;
+};
+
+/**
+ * The glass "app icon" tile with Hula's glowing orb — the real project logo.
+ *
+ * `assets/images/hula-logo.png` is the actual Hula tile, but it ships on an
+ * opaque white canvas (no alpha) with ~20% margin on each side. Rather than
+ * approximate the orb with drawn shapes (which didn't match), we render the
+ * real asset and crop the white border away: the image is scaled up inside an
+ * `overflow: hidden` rounded container so only the dark tile interior + orb
+ * remain, and the rounded corners clip any residual white. No new asset needed.
+ */
+export function HulaLogoTile({ size = 92 }: Props) {
+  const radius = size * 0.3;
+
+  return (
+    <View style={[styles.glowWrap, { borderRadius: radius }]}>
+      <View
+        style={[styles.clip, { width: size, height: size, borderRadius: radius }]}
+      >
+        <Image
+          source={images.hulaLogo}
+          style={{ width: size, height: size, transform: [{ scale: ZOOM }] }}
+          resizeMode="cover"
+        />
+      </View>
+    </View>
+  );
+}
+
+// Show the central ~52% of the source image so the white margin (~20% a side)
+// is pushed outside the clip and only the dark tile + orb are visible.
+const ZOOM = 1.92;
+
+const styles = StyleSheet.create({
+  glowWrap: {
+    ...Platform.select({
+      ios: {
+        shadowColor: hula.glow.purple,
+        shadowOpacity: 0.5,
+        shadowRadius: 22,
+        shadowOffset: { width: 0, height: 0 },
+      },
+      default: {},
+    }),
+  },
+  clip: {
+    overflow: 'hidden',
+    backgroundColor: hula.orb.coreOuter,
+    borderWidth: 1,
+    borderColor: hula.glass.tileBorder,
+  },
+});

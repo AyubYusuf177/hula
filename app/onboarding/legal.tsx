@@ -1,119 +1,145 @@
 import { useAuth } from '@clerk/clerk-expo';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { HulaBottomButton, HulaOnboardingFrame } from '@/components/onboarding';
 import { hula } from '@/constants/theme';
-import { onboardingKey, setOnboardingComplete } from '@/lib/onboarding';
+import {
+  getOnboardingStep,
+  LEGAL_ROWS,
+  LEGAL_TRUST_COPY,
+  ONBOARDING_CTA,
+} from '@/data/hulaOnboarding';
+import { setOnboardingAnswer } from '@/lib/onboardingAnswers';
 
 const font = hula.typography.fontFamily;
+const step = getOnboardingStep('legal');
 
 /**
- * Placeholder onboarding entry screen. The real flow is not built yet — this
- * only exists so signed-in + not-yet-onboarded users have somewhere to land.
- * The temporary "Continue" marks onboarding complete for the current Clerk
- * userId, then routes to /home.
+ * Onboarding page 1 — Terms of Service & Privacy Policy.
+ *
+ * Accepting records `legalAcceptedAt` locally (per Clerk userId) and advances
+ * to the sex page. It does NOT mark onboarding complete — this is Section 1.
  */
 export default function OnboardingLegal() {
   const router = useRouter();
   const { userId } = useAuth();
+  const [saving, setSaving] = useState(false);
 
-  const finish = async () => {
-    if (!userId) return;
-    await setOnboardingComplete(userId);
-    router.replace('/home');
+  const onAccept = async () => {
+    if (saving) return;
+    setSaving(true);
+    await setOnboardingAnswer(userId, { legalAcceptedAt: new Date().toISOString() });
+    router.push('/onboarding/sex');
   };
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <StatusBar style="light" />
-      <View style={styles.center}>
-        <Text style={styles.title}>Onboarding starts here</Text>
-
-        <Pressable onPress={finish} hitSlop={12} disabled={!userId} style={styles.link}>
-          <Text style={styles.linkText}>Continue →</Text>
-        </Pressable>
-
-        {__DEV__ ? <OnboardingDebug userId={userId} /> : null}
+    <HulaOnboardingFrame
+      progress={step.progress}
+      showLogo
+      title={step.title}
+      subtitle={step.subtitle}
+      footer={
+        <>
+          <Text style={styles.agreement}>
+            By tapping “Accept and Continue”, you agree to our{' '}
+            <Text style={styles.agreementLink}>Terms of Service</Text> and{' '}
+            <Text style={styles.agreementLink}>Privacy Policy</Text>.
+          </Text>
+          <HulaBottomButton
+            label={ONBOARDING_CTA.legal}
+            onPress={onAccept}
+            loading={saving}
+          />
+        </>
+      }
+    >
+      <View style={styles.rowsCard}>
+        {LEGAL_ROWS.map((row, i) => (
+          <View key={row.id}>
+            {i > 0 ? <View style={styles.divider} /> : null}
+            <Pressable
+              style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+              hitSlop={4}
+            >
+              <View style={styles.rowIcon}>
+                <Ionicons name={row.icon} size={20} color={hula.colors.text.primary} />
+              </View>
+              <Text style={styles.rowLabel}>{row.label}</Text>
+              <Ionicons
+                name="chevron-forward"
+                size={20}
+                color={hula.colors.text.tertiary}
+              />
+            </Pressable>
+          </View>
+        ))}
       </View>
-    </SafeAreaView>
-  );
-}
 
-/** Dev-only readout of the exact key/value driving onboarding routing. */
-function OnboardingDebug({ userId }: { userId: string | null | undefined }) {
-  const [value, setValue] = useState<string | null>(null);
-  const key = userId ? onboardingKey(userId) : '(no userId yet)';
-
-  useEffect(() => {
-    if (!userId) return;
-    let active = true;
-    AsyncStorage.getItem(onboardingKey(userId)).then((v) => {
-      if (active) setValue(v);
-    });
-    return () => {
-      active = false;
-    };
-  }, [userId]);
-
-  return (
-    <View style={styles.debug}>
-      <Text style={styles.debugTitle}>DEBUG (onboarding)</Text>
-      <Text style={styles.debugLine}>userId: {userId ?? '(none)'}</Text>
-      <Text style={styles.debugLine}>key: {key}</Text>
-      <Text style={styles.debugLine}>value: {value ?? '(missing)'}</Text>
-    </View>
+      <Text style={styles.trust}>{LEGAL_TRUST_COPY}</Text>
+    </HulaOnboardingFrame>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: hula.colors.voidBlack,
-  },
-  center: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: hula.spacing.xl,
-  },
-  title: {
-    fontFamily: font.bold,
-    fontSize: hula.typography.hero.fontSize,
-    lineHeight: hula.typography.hero.lineHeight,
-    color: hula.colors.text.primary,
-    textAlign: 'center',
-  },
-  link: {
-    marginTop: hula.spacing['2xl'],
-  },
-  linkText: {
-    fontFamily: font.medium,
-    fontSize: hula.typography.hint.fontSize,
-    color: hula.glow.purpleBright,
-  },
-  debug: {
-    marginTop: hula.spacing['2xl'],
-    padding: hula.spacing.md,
-    borderRadius: 12,
+  rowsCard: {
+    width: '100%',
+    marginTop: hula.spacing.xl,
+    borderRadius: hula.radius.card,
+    backgroundColor: hula.glass.card,
     borderWidth: 1,
     borderColor: hula.glass.cardBorder,
+    paddingHorizontal: hula.spacing.xl,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: hula.spacing.lg + 2,
+  },
+  rowPressed: {
+    opacity: 0.7,
+  },
+  rowIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
     backgroundColor: hula.glass.tile,
-    alignSelf: 'stretch',
+    borderWidth: 1,
+    borderColor: hula.glass.tileBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: hula.spacing.lg,
   },
-  debugTitle: {
-    fontFamily: font.semiBold,
+  rowLabel: {
+    flex: 1,
+    fontFamily: font.medium,
+    fontSize: hula.typography.hint.fontSize,
+    color: hula.colors.text.primary,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: hula.glass.cardBorder,
+  },
+  trust: {
+    marginTop: hula.spacing.xl,
+    fontFamily: font.regular,
     fontSize: hula.typography.legal.fontSize,
-    color: hula.colors.text.tertiary,
-    marginBottom: hula.spacing.xs,
+    lineHeight: hula.typography.legal.lineHeight,
+    color: hula.colors.text.faint,
+    textAlign: 'center',
   },
-  debugLine: {
+  agreement: {
     fontFamily: font.regular,
     fontSize: hula.typography.legal.fontSize,
     lineHeight: hula.typography.legal.lineHeight,
     color: hula.colors.text.tertiary,
+    textAlign: 'center',
+    marginBottom: hula.spacing.lg,
+  },
+  agreementLink: {
+    fontFamily: font.medium,
+    color: hula.glow.purpleBright,
   },
 });

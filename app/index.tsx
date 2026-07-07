@@ -1,53 +1,90 @@
 import { useAuth } from '@clerk/clerk-expo';
-import { Redirect } from 'expo-router';
+import { Redirect, type Href } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { View } from 'react-native';
 
 import { HulaOnboarding } from '@/components/onboarding';
 import { hula } from '@/constants/theme';
-import { getOnboardingComplete } from '@/lib/onboarding';
+import {
+  getOnboardingComplete,
+  getOnboardingStage,
+  type OnboardingStage,
+} from '@/lib/onboarding';
 
 /**
  * Auth-aware entry gate.
  *
  * - signed out                        → the Hula launch/auth experience
- * - signed in + onboarding incomplete → /onboarding/legal
  * - signed in + onboarding complete   → /home
+ * - signed in + a saved stage         → the matching Section 2 screen
+ * - signed in + nothing saved         → /onboarding/legal
  *
- * The onboarding flag is scoped to the current Clerk `userId`, so a
- * deleted-then-recreated account (new userId) is correctly treated as new.
+ * Both flags are scoped to the current Clerk `userId`, so a deleted-then-
+ * recreated account (new userId) is correctly treated as new. The stage lets a
+ * user who reached, say, "what happens next" sign out and back in and resume
+ * there rather than restarting the questions.
  *
- * While Clerk is resolving the session (or we are reading the local onboarding
- * flag) we render a plain void-black view so there is no flash before routing.
+ * While Clerk is resolving the session (or we are reading the local flags) we
+ * render a plain void-black view so there is no flash before routing.
  */
 export default function Index() {
   const { isLoaded, isSignedIn, userId } = useAuth();
-  const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
+  const [route, setRoute] = useState<{ complete: boolean; stage: OnboardingStage | null } | null>(
+    null,
+  );
 
   useEffect(() => {
     // Only decide once Clerk has resolved a signed-in user with a real userId.
     if (!isSignedIn || !userId) {
-      setOnboardingComplete(null);
+      setRoute(null);
       return;
     }
     let active = true;
-    setOnboardingComplete(null);
-    getOnboardingComplete(userId).then((complete) => {
-      if (active) setOnboardingComplete(complete);
-    });
+    setRoute(null);
+    Promise.all([getOnboardingComplete(userId), getOnboardingStage(userId)]).then(
+      ([complete, stage]) => {
+        if (active) setRoute({ complete, stage });
+      },
+    );
     return () => {
       active = false;
     };
   }, [isSignedIn, userId]);
 
-  // Waiting on Clerk, or on the onboarding flag for a signed-in user.
-  if (!isLoaded || (isSignedIn && (!userId || onboardingComplete === null))) {
+  // Waiting on Clerk, or on the local flags for a signed-in user.
+  if (!isLoaded || (isSignedIn && (!userId || route === null))) {
     return <View style={{ flex: 1, backgroundColor: hula.colors.voidBlack }} />;
   }
 
-  if (isSignedIn) {
-    return <Redirect href={onboardingComplete ? '/home' : '/onboarding/legal'} />;
+  if (isSignedIn && route) {
+    return <Redirect href={resolveOnboardingHref(route.complete, route.stage)} />;
   }
 
   return <HulaOnboarding />;
+}
+
+/** Maps the local onboarding state to the screen a signed-in user should land on. */
+function resolveOnboardingHref(complete: boolean, stage: OnboardingStage | null): Href {
+  // Completion always wins — a finished user goes straight home.
+  if (complete) return '/home';
+
+  switch (stage) {
+    case 'checking_subscription':
+      return '/onboarding/checking-subscription';
+    case 'all_set':
+      return '/onboarding/all-set';
+    case 'what_happens_next':
+      return '/onboarding/what-happens-next';
+    case 'paywall':
+      return '/onboarding/paywall';
+    case 'free_preview':
+      return '/onboarding/free-preview';
+    case 'preview_active':
+    case 'complete':
+      // These stages imply the flow finished; treat like a completed user.
+      return '/home';
+    default:
+      // No stage (or still answering questions) → start of the flow.
+      return '/onboarding/legal';
+  }
 }
