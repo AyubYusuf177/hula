@@ -1,8 +1,9 @@
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
+import { Redirect, useFocusEffect, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useCallback, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -12,6 +13,8 @@ import {
   clearOnboardingStage,
 } from '@/lib/onboarding';
 import { clearHulaPreview } from '@/lib/hulaPreview';
+import { getHulaProfile, type HulaProfile } from '@/lib/hulaProfile';
+import { resolveDisplayName, resolveInitials } from '@/lib/hulaUser';
 import { clearOnboardingAnswers } from '@/lib/onboardingAnswers';
 
 const font = hula.typography.fontFamily;
@@ -37,17 +40,40 @@ const MENU_ROWS: readonly MenuRow[] = [
  */
 export default function Home() {
   const router = useRouter();
-  const { signOut, userId } = useAuth();
+  const { signOut, userId, isLoaded, isSignedIn } = useAuth();
   const { user } = useUser();
 
-  const displayName = getDisplayName(user);
-  const initials = getInitials(user);
+  const [profile, setProfile] = useState<HulaProfile>({});
+
+  // Refresh the local name override on focus so a name edited in Settings shows
+  // here on return.
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      getHulaProfile(userId).then((p) => {
+        if (active) setProfile(p);
+      });
+      return () => {
+        active = false;
+      };
+    }, [userId]),
+  );
+
+  const displayName = resolveDisplayName(user, profile.displayName);
+  const initials = resolveInitials(user, profile.displayName);
 
   const onSignOut = async () => {
     // Sign out only. We do NOT clear onboarding flags here.
     await signOut();
     router.replace('/');
   };
+
+  // Once Clerk resolves a signed-out session (e.g. after Sign Out / delete),
+  // never render the stale account UI — bounce to the entry gate. This also
+  // prevents back-navigation landing on a previous user's Home.
+  if (isLoaded && !isSignedIn) {
+    return <Redirect href="/" />;
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -61,7 +87,7 @@ export default function Home() {
         {/* Top bar */}
         <View style={styles.topBar}>
           <CircleIcon icon="chatbubble-ellipses-outline" onPress={() => {}} />
-          <CircleIcon icon="settings-outline" onPress={() => {}} />
+          <CircleIcon icon="settings-outline" onPress={() => router.push('/settings')} />
         </View>
 
         {/* Profile */}
@@ -185,29 +211,6 @@ function DevReset({ userId }: { userId: string | null | undefined }) {
       <Text style={styles.devResetText}>DEV · Reset onboarding & restart flow</Text>
     </Pressable>
   );
-}
-
-function getDisplayName(user: ReturnType<typeof useUser>['user']): string {
-  if (!user) return 'Hula User';
-  if (user.fullName) return user.fullName;
-  const parts = [user.firstName, user.lastName].filter(Boolean);
-  if (parts.length) return parts.join(' ');
-  const email = user.primaryEmailAddress?.emailAddress;
-  if (email) return email.split('@')[0];
-  return 'Hula User';
-}
-
-function getInitials(user: ReturnType<typeof useUser>['user']): string {
-  const name = user?.fullName || [user?.firstName, user?.lastName].filter(Boolean).join(' ');
-  if (name) {
-    const words = name.trim().split(/\s+/);
-    const first = words[0]?.[0] ?? '';
-    const second = words[1]?.[0] ?? '';
-    return (first + second).toUpperCase() || 'HU';
-  }
-  const email = user?.primaryEmailAddress?.emailAddress;
-  if (email) return email.slice(0, 2).toUpperCase();
-  return 'HU';
 }
 
 const styles = StyleSheet.create({
