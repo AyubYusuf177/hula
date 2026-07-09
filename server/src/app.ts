@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 
 import { healthRouter } from "./routes/health";
+import { sendblueWebhookRouter } from "./routes/webhooks";
 
 /**
  * Builds the Express application. Kept separate from `index.ts` so the app can
@@ -13,6 +14,7 @@ export function createApp(): Express {
 
   // Routes
   app.use(healthRouter);
+  app.use(sendblueWebhookRouter);
 
   return app;
 }
