@@ -1,9 +1,10 @@
 # Hula Server
 
-Channel-agnostic backend for the Hula AI messaging agent. This is the **Section 1
-skeleton only** — folder structure, core TypeScript types, env validation, and a
-health route. No provider logic (Sendblue, model, database, integrations,
-billing) is implemented yet.
+Channel-agnostic backend for the Hula AI messaging agent.
+
+- **Section 1** — folder structure, core TypeScript types, env validation, health route.
+- **Section 2** — a real Sendblue iMessage webhook round trip with a fixed canned
+  reply. No AI, database, integrations, reminders, or billing yet.
 
 The server is fully separate from the Expo app and runs independently.
 
@@ -18,9 +19,9 @@ types in `src/channels/types.ts`.
 
 ```bash
 cd server
-cp .env.example .env   # placeholders are fine for Section 1
+cp .env.example .env   # then fill in the Sendblue values for the round trip
 npm install
-npm run dev            # start with hot reload (tsx)
+npm run dev            # start with hot reload (tsx); auto-loads .env
 ```
 
 Verify it's up:
@@ -29,6 +30,39 @@ Verify it's up:
 curl http://localhost:4000/health
 # { "ok": true, "service": "hula-server" }
 ```
+
+## Sendblue environment variables
+
+The webhook round trip needs these in `server/.env` (real values are private and
+must never be committed — see `.env.example` for placeholder names):
+
+| Variable                          | Purpose                                             |
+| --------------------------------- | --------------------------------------------------- |
+| `SENDBLUE_API_KEY`                | Sendblue API key id (`sb-api-key-id` header).       |
+| `SENDBLUE_API_SECRET`             | Sendblue API secret (`sb-api-secret-key` header).   |
+| `SENDBLUE_HULA_NUMBER`            | Hula's dedicated Sendblue line (the `from_number`). |
+| `SENDBLUE_WEBHOOK_SIGNING_SECRET` | Reserved for inbound webhook signature checks.      |
+
+`npm run dev` and `npm start` load `.env` automatically via Node's
+`--env-file-if-exists`; no `dotenv` dependency is used.
+
+## Test the Sendblue webhook round trip locally
+
+1. Start the server: `npm run dev`
+2. Expose it publicly with ngrok: `ngrok http 4000`
+3. In the Sendblue dashboard, set the inbound webhook URL to:
+   `https://YOUR-NGROK-SUBDOMAIN.ngrok-free.app/webhooks/sendblue`
+4. From a phone, text Hula's Sendblue number.
+5. Hula replies with the fixed Section 2 message:
+
+   > Hey, I’m Hula. Your iMessage connection is working.
+
+What the webhook does on each inbound message: acknowledges Sendblue with a fast
+`200`, normalizes the payload into Hula's internal `InboundMessage`, then (detached
+from the response) marks the thread read, sends a typing indicator, and delivers
+the canned reply. Read/typing are best-effort and never block the reply. Outbound
+status callbacks and duplicate provider message ids are ignored. Only safe summary
+fields are logged — never message text, media URLs, phone numbers, or secrets.
 
 ## Scripts
 
@@ -49,10 +83,15 @@ src/
   routes/health.ts      # GET /health
   utils/logger.ts       # minimal leveled logger
 
+  routes/webhooks.ts    # POST /webhooks/sendblue (Section 2 round trip)
+
   channels/             # channel-agnostic messaging core
     types.ts            # Channel, Provider, In/OutboundMessage, events, statuses
     registry.ts         # ChannelAdapter contract + registry (empty)
-    sendblue/           # Sendblue provider (types + normalize placeholders)
+    sendblue/           # Sendblue provider
+      types.ts          #   webhook + outbound payload shapes
+      normalize.ts      #   payload -> InboundMessage / ProviderEvent
+      client.ts         #   sendMessage / sendTypingIndicator / markRead
 
   users/                # UserProfile, MessagingIdentity, LinkSession
   conversations/        # Conversation + Message
@@ -68,10 +107,11 @@ src/
 
 ## Not implemented yet (by design)
 
-- Real Sendblue API calls, webhooks, or SDK
-- Model / AI provider calls
-- Database connection or ORM
-- Integrations, billing, WhatsApp
-- The app-side "Text Hula" link flow
+- Model / AI provider calls (the reply is a fixed canned string)
+- Database connection or ORM (dedup uses an in-memory Set for now)
+- Voice note / media transcription (inbound media URLs are preserved, not processed)
+- Webhook signature verification
+- Integrations, billing, WhatsApp, reminders
+- Clerk linking and the app-side "Text Hula" link flow
 
 These arrive in later sections.
