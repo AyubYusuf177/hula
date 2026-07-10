@@ -56,3 +56,51 @@ export async function createLinkSession(
 
   return (await res.json()) as LinkSessionResponse;
 }
+
+/** A single stored message as returned by `GET /v1/me/messages`. */
+export interface MyMessage {
+  id: string;
+  direction: 'inbound' | 'outbound';
+  channel: string;
+  provider: string;
+  text: string | null;
+  status: string | null;
+  conversationId: string | null;
+  createdAt: string; // ISO 8601
+}
+
+/** Response shape of `GET /v1/me/messages`. */
+export interface MyMessagesResponse {
+  messages: MyMessage[];
+  limit: number;
+  order: 'asc' | 'desc';
+  defaultLimit: number;
+  maxLimit: number;
+}
+
+/**
+ * Fetch the signed-in user's own recent Hula messages (newest first by default).
+ * `token` is a Clerk session token from `getToken()`. Used for inspection/debug;
+ * there is no chat UI yet. The backend scopes results to the authenticated user.
+ */
+export async function fetchMyMessages(
+  token: string,
+  params: { limit?: number; order?: 'asc' | 'desc' } = {},
+): Promise<MyMessagesResponse> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set('limit', String(params.limit));
+  if (params.order) query.set('order', params.order);
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+
+  const res = await fetch(`${BASE_URL}/v1/me/messages${suffix}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`me/messages request failed (${res.status})`);
+  }
+
+  return (await res.json()) as MyMessagesResponse;
+}

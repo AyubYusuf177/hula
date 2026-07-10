@@ -12,6 +12,12 @@ Channel-agnostic backend for the Hula AI messaging agent.
   messaging identities now survive a backend restart, and inbound/outbound
   messages, conversations, and a safe summary of each provider event are stored.
   Still no AI, integrations, reminders, billing, WhatsApp, or chat-history UI.
+- **Section 5** — a safe, authenticated inspection layer over the stored
+  conversation data. Audits/confirms inbound + outbound persistence and adds
+  read-only `GET /v1/me/messages` and `GET /v1/me/conversations` endpoints so the
+  signed-in user can verify their own stored messages before the AI brain exists.
+  No schema change. Still no AI, integrations, reminders, billing, WhatsApp, or
+  chat-history UI.
 
 The server is fully separate from the Expo app and runs independently.
 
@@ -163,6 +169,132 @@ and confirm Hula replies `You're connected — text me whenever you need me.`
 Because the identity is now in Postgres, step 10 works even though the backend
 restarted — proving persistence.
 
+## Section 5 — authenticated conversation inspection
+
+Section 5 proves that the data the future AI brain will rely on is stored
+correctly and can be read back safely. **No schema change was needed** — the
+Section 4 `Message`/`Conversation` models already carry every field required.
+
+### What message persistence stores
+
+For every inbound message (from the Sendblue webhook) and every outbound reply,
+a `Message` row is written with, where available: `userId` (when the sender is
+linked), `conversationId`, `direction` (`inbound`/`outbound`), `channel`,
+`provider`, `providerMessageId`, `senderHandle`, `recipientHandle`, `text`,
+`status`, and `createdAt`. A `Conversation` is found-or-created per
+user/channel/provider/handle (the normalized handle is the thread key), so the
+same thread is reused across restarts and back-filled with the `userId` once the
+sender links. Each webhook also writes a `ProviderEvent` holding only a
+**redacted summary** — never the raw payload.
+
+### New endpoints (Clerk-guarded, read-only)
+
+Both require `Authorization: Bearer <clerk session token>`, resolve the Hula
+`User` from the token's Clerk id, and return **only that user's** rows. They
+never return secrets, other users' data, or raw provider payloads.
+
+**`GET /v1/me/messages`** — the user's recent messages, **newest first** by
+default. Query params: `limit` (default `50`, max `100`, invalid/≤0 → `50`) and
+`order` (`desc` default, or `asc` for oldest-first).
+
+```jsonc
+// 200 OK — GET /v1/me/messages?limit=50
+{
+  "messages": [
+    {
+      "id": "clx…",
+      "direction": "outbound",
+      "channel": "imessage",
+      "provider": "sendblue",
+      "text": "You're connected to Hula.",
+      "status": "sent",
+      "conversationId": "clx…",
+      "createdAt": "2026-07-10T18:40:12.123Z"
+    },
+    {
+      "id": "clx…",
+      "direction": "inbound",
+      "channel": "imessage",
+      "provider": "sendblue",
+      "text": "Test section 5",
+      "status": "received",
+      "conversationId": "clx…",
+      "createdAt": "2026-07-10T18:40:11.001Z"
+    }
+  ],
+  "limit": 50,
+  "order": "desc",
+  "defaultLimit": 50,
+  "maxLimit": 100
+}
+```
+
+**`GET /v1/me/conversations`** — the user's conversations with a message count
+each, most recently active first. Same auth/safety; same `limit` clamping.
+
+```jsonc
+// 200 OK — GET /v1/me/conversations
+{
+  "conversations": [
+    {
+      "id": "clx…",
+      "channel": "imessage",
+      "provider": "sendblue",
+      "messageCount": 2,
+      "createdAt": "2026-07-10T18:39:00.000Z",
+      "updatedAt": "2026-07-10T18:40:12.123Z"
+    }
+  ],
+  "limit": 50
+}
+```
+
+Auth failures return `401` (`missing_bearer_token` / `invalid_token`); a server
+with no `CLERK_SECRET_KEY` returns `503 auth_not_configured`.
+
+### End-to-end test
+
+1. Start the backend (`npm run dev`), start ngrok, confirm `GET /health` via the
+   ngrok URL returns `{ "ok": true }`.
+2. Start Expo and open the Hula app.
+3. From the already-linked iMessage thread, text Hula: `Test section 5`.
+4. Confirm Hula replies: `You're connected to Hula.`
+5. Call the endpoint with a Clerk session token (see below):
+
+   ```bash
+   curl -s -H "Authorization: Bearer $CLERK_TOKEN" \
+     "$HULA_API_URL/v1/me/messages?limit=50" | jq
+   ```
+
+   Confirm both the inbound `Test section 5` and the outbound
+   `You're connected to Hula.` appear for the authenticated user.
+6. **Restart the backend**, text Hula again, confirm the reply still works and
+   the new messages appear from the endpoint — proving persistence survives a
+   restart and stays queryable.
+
+### Getting a Clerk token for local testing (no secrets exposed)
+
+The endpoint verifies a real Clerk **session** token — auth is never weakened for
+testing. The easiest safe options:
+
+- **From the app (recommended):** temporarily log `await getToken()` in a dev
+  build, copy the value into `CLERK_TOKEN` in your shell, and curl. Session
+  tokens are short-lived (~60s), so grab a fresh one right before the request.
+  Never commit or paste it anywhere shared.
+- **Clerk dashboard:** use Clerk's "Impersonate / testing token" tooling for the
+  same user, if enabled.
+
+Do not disable `requireClerkAuth` or print the token in logs.
+
+### Offline persistence check (no Sendblue/Clerk/ngrok)
+
+`npm run test:persistence` drives the persistence helpers directly against the
+database: it creates two throwaway users, writes an inbound + outbound message
+for one, verifies `GET /v1/me/messages`' query returns only that user's rows (and
+never the other user's), then deletes everything it created. It **skips** with a
+notice when `DATABASE_URL` is unset, requires no real Sendblue, and prints no
+secrets.
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -170,7 +302,8 @@ restarted — proving persistence.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Run the offline normalization + linking tests.|
+| `npm test`                 | Offline normalization + linking + query tests.|
+| `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -190,6 +323,7 @@ src/
 
   routes/webhooks.ts    # POST /webhooks/sendblue (inbound + code linking)
   routes/linkSessions.ts# POST /v1/link-sessions (Section 3, Clerk-guarded)
+  routes/me.ts          # GET /v1/me/messages + /v1/me/conversations (Section 5)
   auth/clerk.ts         # Clerk token verification + requireClerkAuth middleware
 
   channels/             # channel-agnostic messaging core
@@ -216,6 +350,7 @@ src/
   db/
     prisma.ts           #   lazy Prisma client singleton
     persist.ts          #   record inbound/outbound messages + provider events
+    queries.ts          #   read-side helpers for the Section 5 inspection routes
     schema.ts           #   type-only DRAFT for not-yet-persisted tables
 
 prisma/
