@@ -1,0 +1,169 @@
+// Hula server — Prisma schema (Section 4).
+//
+// This is the first real persistence layer. It replaces the in-memory link
+// sessions and messaging identities from Section 3 and begins persisting
+// provider events, conversations, and messages.
+//
+// Connection URLs come from the environment and are NEVER committed:
+//   - DATABASE_URL: pooled Neon connection used at runtime.
+//   - DIRECT_URL:   direct connection Prisma may need for migrations. If your
+//                   DATABASE_URL is a pooled URL, migrations can fail against
+//                   the pooler — set DIRECT_URL to Neon's direct (unpooled) URL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// Status of a one-time connect code.
+enum LinkSessionStatus {
+  pending
+  used
+  expired
+}
+
+/// Whether a linked messaging identity is currently usable.
+enum MessagingIdentityStatus {
+  active
+  disabled
+}
+
+/// Direction of a stored message relative to Hula.
+enum MessageDirection {
+  inbound
+  outbound
+}
+
+/// A Hula account, keyed off the Clerk user id.
+model User {
+  id          String  @id @default(cuid())
+  clerkUserId String  @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  profile       UserProfile?
+  identities    MessagingIdentity[]
+  linkSessions  LinkSession[]
+  conversations Conversation[]
+  messages      Message[]
+
+  @@map("users")
+}
+
+/// Server-side profile mirroring onboarding / settings.
+model UserProfile {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  displayName String?
+  firstName   String?
+  birthday    String?
+  sex         String?
+  tone        String?
+  timezone    String?
+  locale      String?
+  country     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+/// A provider sender handle (phone/email) linked to a Hula user.
+model MessagingIdentity {
+  id                String                  @id @default(cuid())
+  userId            String
+  channel           String
+  provider          String
+  handleNormalized  String                  @unique
+  handleDisplay     String?
+  status            MessagingIdentityStatus @default(active)
+  linkedAt          DateTime                @default(now())
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("messaging_identities")
+}
+
+/// A short-lived one-time connect code for the "Text hula" flow.
+model LinkSession {
+  id        String            @id @default(cuid())
+  code      String            @unique
+  userId    String
+  status    LinkSessionStatus @default(pending)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("link_sessions")
+}
+
+/// A durable thread between a user and Hula over a channel/provider.
+model Conversation {
+  id               String   @id @default(cuid())
+  userId           String?
+  channel          String
+  provider         String
+  externalThreadId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  messages Message[]
+
+  @@index([userId])
+  @@index([channel, provider, externalThreadId])
+  @@map("conversations")
+}
+
+/// A single stored message turn (inbound or outbound).
+model Message {
+  id                String           @id @default(cuid())
+  conversationId    String?
+  userId            String?
+  direction         MessageDirection
+  channel           String
+  provider          String
+  providerMessageId String?
+  senderHandle      String?
+  recipientHandle   String?
+  text              String?
+  contentJson       Json?
+  status            String?
+  createdAt         DateTime         @default(now())
+
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId])
+  @@index([userId])
+  @@index([providerMessageId])
+  @@map("messages")
+}
+
+/// A safe summary of an inbound/outbound provider webhook event. Raw payloads
+/// are intentionally NOT stored yet — only a redacted summary.
+model ProviderEvent {
+  id                 String   @id @default(cuid())
+  provider           String
+  eventType          String
+  providerEventId    String?
+  providerMessageId  String?
+  payloadSummaryJson Json?
+  createdAt          DateTime @default(now())
+
+  @@index([providerMessageId])
+  @@map("provider_events")
+}

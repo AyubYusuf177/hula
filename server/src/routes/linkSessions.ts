@@ -35,27 +35,34 @@ function pickFirstName(body: LinkSessionRequestBody): string | undefined {
 linkSessionsRouter.post(
   "/v1/link-sessions",
   requireClerkAuth,
-  (req, res) => {
+  async (req, res) => {
     // `requireClerkAuth` guarantees this is set on success.
     const clerkUserId = req.clerkUserId as string;
 
     const body = (req.body ?? {}) as LinkSessionRequestBody;
     const firstName = pickFirstName(body);
 
-    const session = createLinkSession(clerkUserId);
-    const hulaNumber = env.SENDBLUE_HULA_NUMBER ?? DEFAULT_HULA_NUMBER;
-    const messageBody = buildLinkMessageBody(session.code, firstName);
+    try {
+      const session = await createLinkSession(clerkUserId);
+      const hulaNumber = env.SENDBLUE_HULA_NUMBER ?? DEFAULT_HULA_NUMBER;
+      const messageBody = buildLinkMessageBody(session.code, firstName);
 
-    // Log the creation without exposing the user id, code, or number.
-    logger.info("link-session created", {
-      hasFirstName: Boolean(firstName),
-      expiresInMs: session.expiresAt - session.createdAt,
-    });
+      // Log the creation without exposing the user id, code, or number.
+      logger.info("link-session created", {
+        hasFirstName: Boolean(firstName),
+        expiresInMs: session.expiresAt.getTime() - session.createdAt.getTime(),
+      });
 
-    res.status(201).json({
-      code: session.code,
-      hulaNumber,
-      messageBody,
-    });
+      res.status(201).json({
+        code: session.code,
+        hulaNumber,
+        messageBody,
+      });
+    } catch (err) {
+      logger.error("link-session create failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+      res.status(500).json({ error: "link_session_failed" });
+    }
   },
 );

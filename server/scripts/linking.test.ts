@@ -1,44 +1,28 @@
 import assert from "node:assert/strict";
 
 import {
-  _resetLinkSessions,
   buildLinkMessageBody,
-  createLinkSession,
   extractLinkCode,
-  getValidLinkSession,
 } from "../src/users/linkSessions";
-import {
-  _resetIdentities,
-  getLinkedIdentity,
-} from "../src/users/messagingIdentity";
-import { LINK_REPLIES, resolveInboundLink } from "../src/users/linking";
+import { normalizeHandleKey } from "../src/users/messagingIdentity";
+import { LINK_REPLIES, decideLinkOutcome } from "../src/users/linking";
 
 /**
- * Offline test for the Section 3 connect-code linking flow. Uses only the
- * in-memory stores — no network, no Clerk, no Sendblue, no DB. Run with:
- * `npm test`.
+ * Offline test for the connect-code linking flow. Covers the PURE pieces that
+ * need no database: the code/message helpers, handle normalization, and the
+ * `decideLinkOutcome` decision table. The database-backed pieces
+ * (createLinkSession, getLinkedIdentity, linkIdentity, resolveInboundLink) are
+ * exercised end-to-end via the manual persistence test in the README.
+ *
+ * No network, no Clerk, no Sendblue, no DB. Run with: `npm test`.
  */
 
 let passed = 0;
 function check(name: string, fn: () => void): void {
-  _resetLinkSessions();
-  _resetIdentities();
   fn();
   passed += 1;
   console.log(`  ok - ${name}`);
 }
-
-const CODE_SHAPE = /^HULA-[A-Z0-9]{4}$/;
-
-check("createLinkSession returns a well-formed, unique code", () => {
-  const a = createLinkSession("user_a");
-  const b = createLinkSession("user_b");
-  assert.match(a.code, CODE_SHAPE);
-  assert.match(b.code, CODE_SHAPE);
-  assert.notEqual(a.code, b.code);
-  assert.equal(a.used, false);
-  assert.ok(a.expiresAt > a.createdAt);
-});
 
 check("buildLinkMessageBody uses first name or falls back to 'me'", () => {
   assert.equal(
@@ -60,102 +44,68 @@ check("extractLinkCode finds the code inside a natural message", () => {
   assert.equal(extractLinkCode(undefined), undefined);
 });
 
-check("valid code links the sender and replies connected", () => {
-  const session = createLinkSession("user_a");
-  const outcome = resolveInboundLink({
-    senderHandle: "+447000000000",
-    text: buildLinkMessageBody(session.code, "Ayub"),
-    provider: "sendblue",
-    channel: "imessage",
+check("normalizeHandleKey collapses phone formats to bare digits", () => {
+  assert.equal(normalizeHandleKey("+1 (646) 548-0761"), "16465480761");
+  assert.equal(normalizeHandleKey("+16465480761"), "16465480761");
+  // Emails are lowercased, not digit-stripped.
+  assert.equal(normalizeHandleKey("Me@Example.com"), "me@example.com");
+});
+
+check("valid code on a fresh handle links and replies connected", () => {
+  const outcome = decideLinkOutcome({
+    existingUserId: undefined,
+    sessionUserId: "user_a",
   });
   assert.equal(outcome.status, "connected");
   assert.equal(outcome.reply, LINK_REPLIES.connected);
-  assert.equal(getLinkedIdentity("+447000000000")?.clerkUserId, "user_a");
-  // Code is now used and cannot be reused.
-  assert.equal(getValidLinkSession(session.code), undefined);
+  assert.equal(outcome.codeMatched, true);
+  assert.equal(outcome.effect, "link_and_consume");
 });
 
-check("already-linked sender without a code gets alreadyConnected", () => {
-  const session = createLinkSession("user_a");
-  resolveInboundLink({
-    senderHandle: "+447000000000",
-    text: buildLinkMessageBody(session.code, "Ayub"),
-    provider: "sendblue",
-    channel: "imessage",
-  });
-  const outcome = resolveInboundLink({
-    senderHandle: "+447000000000",
-    text: "what's the weather?",
-    provider: "sendblue",
-    channel: "imessage",
+check("owner re-sending their own code is treated as already connected", () => {
+  const outcome = decideLinkOutcome({
+    existingUserId: "user_a",
+    sessionUserId: "user_a",
   });
   assert.equal(outcome.status, "already_connected");
   assert.equal(outcome.reply, LINK_REPLIES.alreadyConnected);
-});
-
-check("unknown sender without a code gets notConnected", () => {
-  const outcome = resolveInboundLink({
-    senderHandle: "+447000000000",
-    text: "hello?",
-    provider: "sendblue",
-    channel: "imessage",
-  });
-  assert.equal(outcome.status, "not_connected");
-  assert.equal(outcome.reply, LINK_REPLIES.notConnected);
-  assert.equal(getLinkedIdentity("+447000000000"), undefined);
+  assert.equal(outcome.codeMatched, true);
+  // The code is consumed but no new identity is created.
+  assert.equal(outcome.effect, "consume_only");
 });
 
 check("a code for a different user does not relink an owned handle", () => {
-  // Handle first linked to user_a.
-  const first = createLinkSession("user_a");
-  resolveInboundLink({
-    senderHandle: "+447000000000",
-    text: buildLinkMessageBody(first.code),
-    provider: "sendblue",
-    channel: "imessage",
-  });
-  // Now a code owned by user_b arrives from the SAME handle.
-  const second = createLinkSession("user_b");
-  const outcome = resolveInboundLink({
-    senderHandle: "+447000000000",
-    text: buildLinkMessageBody(second.code),
-    provider: "sendblue",
-    channel: "imessage",
+  const outcome = decideLinkOutcome({
+    existingUserId: "user_a",
+    sessionUserId: "user_b",
   });
   assert.equal(outcome.status, "different_account");
   assert.equal(outcome.reply, LINK_REPLIES.differentAccount);
-  // Still linked to user_a; the second code was NOT consumed.
-  assert.equal(getLinkedIdentity("+447000000000")?.clerkUserId, "user_a");
-  assert.ok(getValidLinkSession(second.code));
+  assert.equal(outcome.codeMatched, true);
+  // The code is NOT consumed and no relink happens.
+  assert.equal(outcome.effect, "none");
 });
 
-check("expired/used code falls through to identity replies", () => {
-  const session = createLinkSession("user_a");
-  // Same handle, but the code shape is valid yet unknown → unknown sender.
-  const outcome = resolveInboundLink({
-    senderHandle: "+447000000001",
-    text: "Connect my account: HULA-ZZZZ",
-    provider: "sendblue",
-    channel: "imessage",
+check("already-linked sender without a valid code gets alreadyConnected", () => {
+  const outcome = decideLinkOutcome({
+    existingUserId: "user_a",
+    sessionUserId: undefined,
+  });
+  assert.equal(outcome.status, "already_connected");
+  assert.equal(outcome.reply, LINK_REPLIES.alreadyConnected);
+  assert.equal(outcome.codeMatched, false);
+  assert.equal(outcome.effect, "none");
+});
+
+check("unknown sender without a valid code gets notConnected", () => {
+  const outcome = decideLinkOutcome({
+    existingUserId: undefined,
+    sessionUserId: undefined,
   });
   assert.equal(outcome.status, "not_connected");
-  // The real session is untouched.
-  assert.ok(getValidLinkSession(session.code));
-});
-
-check("normalized handle matches across formats", () => {
-  const session = createLinkSession("user_a");
-  resolveInboundLink({
-    senderHandle: "+16465480761",
-    text: buildLinkMessageBody(session.code),
-    provider: "sendblue",
-    channel: "imessage",
-  });
-  // Same number, different formatting, resolves to the same identity.
-  assert.equal(
-    getLinkedIdentity("+1 (646) 548-0761")?.clerkUserId,
-    "user_a",
-  );
+  assert.equal(outcome.reply, LINK_REPLIES.notConnected);
+  assert.equal(outcome.codeMatched, false);
+  assert.equal(outcome.effect, "none");
 });
 
 console.log(`\n${passed} linking checks passed.`);

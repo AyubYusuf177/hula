@@ -14,6 +14,7 @@ import {
 import type { SendblueInboundWebhook } from "../channels/sendblue/types";
 import type { InboundMessage } from "../channels/types";
 import { env } from "../config/env";
+import { recordInbound, recordOutbound } from "../db/persist";
 import { resolveInboundLink } from "../users/linking";
 import { logger } from "../utils/logger";
 
@@ -22,17 +23,17 @@ import { logger } from "../utils/logger";
  *
  * Sendblue POSTs inbound messages (and outbound status callbacks) here. We must
  * acknowledge with a 2xx within 45 seconds, so the handler responds immediately
- * and then processes the message on a detached async task. Section 3 replies
- * based on the connect-code linking flow (see `users/linking`) — still no AI and
- * only in-memory state.
+ * and then processes the message on a detached async task. Replies come from the
+ * connect-code linking flow (see `users/linking`) — still no AI. As of Section 4
+ * linking state and messages are persisted to Postgres (see `db/persist`).
  */
 export const sendblueWebhookRouter = Router();
 
 /**
  * In-memory de-duplication of provider message ids. Sendblue may retry a
- * webhook; without persistence (no DB yet) this Set prevents double replies
- * within a single process lifetime. Section 2 only — replace with real storage
- * later. Bounded so it can't grow unboundedly in a long-running process.
+ * webhook; this Set prevents double replies within a single process lifetime.
+ * Kept process-level on purpose (retries arrive within seconds) even though
+ * messages are now persisted. Bounded so it can't grow without limit.
  */
 const seenMessageIds = new Set<string>();
 const MAX_SEEN_IDS = 5000;
@@ -99,8 +100,9 @@ async function processInbound(message: InboundMessage): Promise<void> {
     return;
   }
 
-  // Decide the reply from the linking state (in-memory, no AI, no DB).
-  const outcome = resolveInboundLink({
+  // Decide the reply from the linking state (DB-backed, no AI). This also links
+  // the sender to their Hula user when a valid connect code is present.
+  const outcome = await resolveInboundLink({
     senderHandle: to,
     text: message.content.text,
     provider: message.provider,
@@ -114,12 +116,34 @@ async function processInbound(message: InboundMessage): Promise<void> {
     codeMatched: outcome.codeMatched,
   });
 
+  // Persist the inbound event + message (best-effort; never blocks the reply).
+  const { conversationId } = await recordInbound({
+    message,
+    userId: outcome.userId ?? null,
+    outcomeStatus: outcome.status,
+    codeMatched: outcome.codeMatched,
+  });
+
   // Best-effort presence signals — these must not block or fail the reply.
   await markRead(to);
   await sendTypingIndicator(to);
 
   try {
-    await sendMessage(to, outcome.reply);
+    const response = await sendMessage(to, outcome.reply);
+    // Persist the outbound reply (best-effort; failures never affect delivery).
+    await recordOutbound({
+      conversationId,
+      userId: outcome.userId ?? null,
+      channel: message.channel,
+      provider: message.provider,
+      recipientHandle: to,
+      text: outcome.reply,
+      providerMessageId:
+        typeof response.message_handle === "string"
+          ? response.message_handle
+          : undefined,
+      status: typeof response.status === "string" ? response.status : "sent",
+    });
   } catch (err) {
     logger.error("sendblue.webhook reply failed", {
       to: maskHandle(to),

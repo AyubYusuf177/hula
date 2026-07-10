@@ -8,6 +8,10 @@ Channel-agnostic backend for the Hula AI messaging agent.
 - **Section 3** — connect a signed-in Hula app user to their real iMessage sender
   via a one-time code. Clerk token verification, `POST /v1/link-sessions`, and
   code-based linking in the webhook. In-memory only (no DB), no AI.
+- **Section 4** — real Postgres persistence (Neon + Prisma). Link sessions and
+  messaging identities now survive a backend restart, and inbound/outbound
+  messages, conversations, and a safe summary of each provider event are stored.
+  Still no AI, integrations, reminders, billing, WhatsApp, or chat-history UI.
 
 The server is fully separate from the Expo app and runs independently.
 
@@ -95,19 +99,84 @@ user. Replies (fixed placeholders — no AI yet):
 | Unknown sender, no valid code               | `I can help once this number is connected to your Hula account. …`        |
 | Valid code, but handle owned by another user| `This number is already connected to a Hula account.`                     |
 
-Link codes expire after ~10 minutes and are single-use. All linking state is
-**in memory** for Section 3 (pending sessions + messaging identities); it moves
-to Postgres in Section 4. Logs only ever include a masked sender and the linking
-status — never the code, message text, full number, tokens, or secrets.
+Link codes expire after ~10 minutes and are single-use. Logs only ever include a
+masked sender and the linking status — never the code, message text, full number,
+tokens, or secrets.
+
+## Section 4 — Postgres persistence (Neon + Prisma)
+
+Section 4 replaces the in-memory link sessions and messaging identities with a
+real Postgres database (Neon) via Prisma, and starts persisting conversations,
+messages, and a safe summary of each provider event. Links now survive a backend
+restart.
+
+### Database environment variables
+
+Add these to `server/.env` (real values are private and must never be committed —
+see `.env.example` for placeholder shapes):
+
+| Variable       | Purpose                                                                 |
+| -------------- | ----------------------------------------------------------------------- |
+| `DATABASE_URL` | Pooled Neon connection string used by the Prisma client at runtime.     |
+| `DIRECT_URL`   | Direct (unpooled) Neon connection Prisma may use for migrations.        |
+
+If `DATABASE_URL` is a Neon **pooled** URL, migrations can fail against the
+pooler — in that case set `DIRECT_URL` to Neon's **direct** connection string
+(the endpoint host without `-pooler`). Prisma reads both from `.env` directly.
+
+### Persisted models
+
+`prisma/schema.prisma` defines: `User`, `UserProfile`, `MessagingIdentity`,
+`LinkSession`, `Conversation`, `Message`, and `ProviderEvent`. Provider events
+store only a **redacted summary** (channel, content type, flags, link outcome) —
+never the raw webhook payload.
+
+### Local DB setup
+
+```bash
+cd server
+# 1. Add DATABASE_URL and DIRECT_URL to server/.env (see .env.example)
+npm run prisma:generate     # generate the Prisma client
+npm run prisma:migrate      # create + apply the migration to your database
+npm run dev                 # start the backend (loads .env)
+ngrok http 4000             # expose it publicly
+# 2. Set the Sendblue inbound webhook URL to:
+#    https://YOUR-NGROK-SUBDOMAIN.ngrok-free.app/webhooks/sendblue
+```
+
+Then, from the Expo app, tap **Text hula**, send the prefilled connect message,
+and confirm Hula replies `You're connected — text me whenever you need me.`
+
+### Manual persistence test (proves it survives a restart)
+
+1. Start the backend (`npm run dev`).
+2. Start ngrok and point the Sendblue webhook at it.
+3. Start Expo and open the Hula app.
+4. Tap **Text hula**.
+5. Send the prefilled connect message.
+6. Confirm Hula replies: `You're connected — text me whenever you need me.`
+7. **Stop the backend.**
+8. **Restart the backend** (`npm run dev`).
+9. From the same iMessage thread, send another message (no code).
+10. Confirm Hula replies: `You're connected to Hula.`
+
+Because the identity is now in Postgres, step 10 works even though the backend
+restarted — proving persistence.
 
 ## Scripts
 
-| Script              | Description                          |
-| ------------------- | ------------------------------------ |
-| `npm run dev`       | Run with hot reload via `tsx watch`. |
-| `npm run build`     | Compile TypeScript to `dist/`.       |
-| `npm run typecheck` | Type-check without emitting.         |
-| `npm start`         | Run the compiled server.             |
+| Script                     | Description                                   |
+| -------------------------- | --------------------------------------------- |
+| `npm run dev`              | Run with hot reload via `tsx watch`.          |
+| `npm run build`            | Compile TypeScript to `dist/`.                |
+| `npm run typecheck`        | Type-check without emitting.                  |
+| `npm test`                 | Run the offline normalization + linking tests.|
+| `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
+| `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
+| `npm start`                | Run the compiled server.                      |
+
+> Run `npm run prisma:generate` before `typecheck`/`build` so the generated
+> `@prisma/client` types are available.
 
 ## Structure
 
@@ -131,11 +200,12 @@ src/
       normalize.ts      #   payload -> InboundMessage / ProviderEvent
       client.ts         #   sendMessage / sendTypingIndicator / markRead
 
-  users/                # UserProfile + in-memory linking (Section 3)
-    linkSessions.ts     #   one-time connect codes (create/extract/consume)
-    messagingIdentity.ts#   sender handle -> Clerk user map
-    linking.ts          #   inbound reply decision + linking side effects
-  conversations/        # Conversation + Message
+  users/                # user + DB-backed linking (Section 4)
+    store.ts            #   getOrCreateUserByClerkId (Clerk id -> Hula user)
+    linkSessions.ts     #   one-time connect codes (DB-backed create/get/consume)
+    messagingIdentity.ts#   sender handle -> Hula user (DB-backed)
+    linking.ts          #   pure decideLinkOutcome + DB-backed resolveInboundLink
+  conversations/        # Conversation + Message types
   media/                # media / voice note placeholders
   agent/                # AgentContext, ToolDefinition, prompt layers
   reminders/            # proactive reminder placeholders
@@ -143,13 +213,19 @@ src/
   actions/              # ActionApproval placeholders
   billing/              # Subscription placeholders
   legal/                # LegalConsent placeholders
-  db/schema.ts          # database schema DRAFT (types only, no connection)
+  db/
+    prisma.ts           #   lazy Prisma client singleton
+    persist.ts          #   record inbound/outbound messages + provider events
+    schema.ts           #   type-only DRAFT for not-yet-persisted tables
+
+prisma/
+  schema.prisma         # real DB models (users, identities, sessions, messages…)
+  migrations/           # generated SQL migrations
 ```
 
 ## Not implemented yet (by design)
 
 - Model / AI provider calls (replies are fixed strings)
-- Database connection or ORM (dedup + linking use in-memory maps for now)
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
 - Integrations, billing, WhatsApp, reminders

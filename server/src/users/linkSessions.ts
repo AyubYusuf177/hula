@@ -1,3 +1,6 @@
+import { getPrisma } from "../db/prisma";
+import { getOrCreateUserByClerkId } from "./store";
+
 /**
  * Pending link sessions for the "Text Hula" connect flow.
  *
@@ -8,11 +11,12 @@
  *      that embeds the code (e.g. "Hey Hula, it's Ayub. Connect my account:
  *      HULA-8K2Q").
  *   4. User sends it; the Sendblue webhook receives the inbound message.
- *   5. Backend extracts the code, links the sender handle to the Clerk user,
- *      and marks the code used.
+ *   5. Backend extracts the code, links the sender handle to the user, and
+ *      marks the code used.
  *
- * Section 3: IN-MEMORY ONLY. Codes expire (~10 min) and are single-use. Moves to
- * Postgres in Section 4. Do not add a database here.
+ * Section 4: DATABASE-BACKED via Prisma. Sessions now survive a backend restart.
+ * Codes expire (~10 min) and are single-use. The pure helpers below
+ * (`buildLinkMessageBody`, `extractLinkCode`) do NOT touch the database.
  */
 
 /** Prefix on every generated code, e.g. "HULA-8K2Q". */
@@ -30,17 +34,15 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /** Codes are valid for 10 minutes after creation. */
 const CODE_TTL_MS = 10 * 60 * 1000;
 
+/** A pending/used link session as returned to callers. */
 export interface LinkSession {
   /** Full code including prefix, e.g. "HULA-8K2Q". */
   code: string;
-  clerkUserId: string;
-  createdAt: number; // epoch ms
-  expiresAt: number; // epoch ms
-  used: boolean;
+  /** Internal Hula user id that owns this session. */
+  userId: string;
+  createdAt: Date;
+  expiresAt: Date;
 }
-
-/** In-memory store keyed by the full uppercase code. */
-const sessionsByCode = new Map<string, LinkSession>();
 
 function randomCode(): string {
   let body = "";
@@ -51,33 +53,49 @@ function randomCode(): string {
   return `${CODE_PREFIX}${body}`;
 }
 
-/** Drop expired sessions so the map can't grow without bound. */
-function sweepExpired(now: number): void {
-  for (const [code, session] of sessionsByCode) {
-    if (session.expiresAt <= now) sessionsByCode.delete(code);
+/** Generate a code not already present in the database. */
+async function generateUniqueCode(): Promise<string> {
+  const prisma = getPrisma();
+  // Collisions are astronomically unlikely (~1M combos), but never reuse a code.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const code = randomCode();
+    const existing = await prisma.linkSession.findUnique({
+      where: { code },
+      select: { id: true },
+    });
+    if (!existing) return code;
   }
+  // Extremely unlikely fallback: append the clock to guarantee uniqueness.
+  return `${randomCode()}${Date.now().toString(36).toUpperCase().slice(-2)}`;
 }
 
 /**
- * Create and store a pending link session for a verified Clerk user. The code is
- * unique among currently-active sessions.
+ * Create and store a pending link session for a Clerk user. Ensures the Hula
+ * user exists first, then persists a fresh one-time code.
  */
-export function createLinkSession(clerkUserId: string): LinkSession {
-  const now = Date.now();
-  sweepExpired(now);
+export async function createLinkSession(
+  clerkUserId: string,
+): Promise<LinkSession> {
+  const user = await getOrCreateUserByClerkId(clerkUserId);
+  const code = await generateUniqueCode();
+  const expiresAt = new Date(Date.now() + CODE_TTL_MS);
 
-  let code = randomCode();
-  while (sessionsByCode.has(code)) code = randomCode();
+  const session = await getPrisma().linkSession.create({
+    data: {
+      code,
+      userId: user.id,
+      status: "pending",
+      expiresAt,
+    },
+    select: { code: true, userId: true, createdAt: true, expiresAt: true },
+  });
 
-  const session: LinkSession = {
-    code,
-    clerkUserId,
-    createdAt: now,
-    expiresAt: now + CODE_TTL_MS,
-    used: false,
+  return {
+    code: session.code,
+    userId: session.userId,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
   };
-  sessionsByCode.set(code, session);
-  return session;
 }
 
 /**
@@ -109,27 +127,37 @@ export function extractLinkCode(text: string | undefined): string | undefined {
 }
 
 /**
- * Return a still-valid (not expired, not used) session for a code, or
+ * Return a still-valid (pending, not expired) session for a code, or
  * `undefined`. Does NOT consume it — the caller decides whether to link.
  */
-export function getValidLinkSession(code: string): LinkSession | undefined {
-  const session = sessionsByCode.get(code.toUpperCase());
+export async function getValidLinkSession(
+  code: string,
+): Promise<LinkSession | undefined> {
+  const session = await getPrisma().linkSession.findUnique({
+    where: { code: code.toUpperCase() },
+    select: {
+      code: true,
+      userId: true,
+      status: true,
+      createdAt: true,
+      expiresAt: true,
+    },
+  });
   if (!session) return undefined;
-  if (session.used) return undefined;
-  if (session.expiresAt <= Date.now()) {
-    sessionsByCode.delete(session.code);
-    return undefined;
-  }
-  return session;
+  if (session.status !== "pending") return undefined;
+  if (session.expiresAt.getTime() <= Date.now()) return undefined;
+  return {
+    code: session.code,
+    userId: session.userId,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
+  };
 }
 
 /** Mark a code as used so it can never link again. */
-export function markLinkCodeUsed(code: string): void {
-  const session = sessionsByCode.get(code.toUpperCase());
-  if (session) session.used = true;
-}
-
-/** Test/util only: clear all pending sessions. */
-export function _resetLinkSessions(): void {
-  sessionsByCode.clear();
+export async function markLinkCodeUsed(code: string): Promise<void> {
+  await getPrisma().linkSession.updateMany({
+    where: { code: code.toUpperCase(), status: "pending" },
+    data: { status: "used", usedAt: new Date() },
+  });
 }
