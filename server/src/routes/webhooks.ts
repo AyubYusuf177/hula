@@ -14,6 +14,7 @@ import {
 import type { SendblueInboundWebhook } from "../channels/sendblue/types";
 import type { InboundMessage } from "../channels/types";
 import { env } from "../config/env";
+import { resolveInboundLink } from "../users/linking";
 import { logger } from "../utils/logger";
 
 /**
@@ -21,13 +22,11 @@ import { logger } from "../utils/logger";
  *
  * Sendblue POSTs inbound messages (and outbound status callbacks) here. We must
  * acknowledge with a 2xx within 45 seconds, so the handler responds immediately
- * and then processes the message on a detached async task. Section 2 replies
- * with a single fixed canned message — no AI, no persistence.
+ * and then processes the message on a detached async task. Section 3 replies
+ * based on the connect-code linking flow (see `users/linking`) — still no AI and
+ * only in-memory state.
  */
 export const sendblueWebhookRouter = Router();
-
-/** The only reply Hula sends in Section 2. */
-const CANNED_REPLY = "Hey, I’m Hula. Your iMessage connection is working.";
 
 /**
  * In-memory de-duplication of provider message ids. Sendblue may retry a
@@ -82,9 +81,10 @@ function logInboundSummary(message: InboundMessage): void {
 }
 
 /**
- * Handle an inbound user message: mark read, show typing, send the canned
- * reply. Runs detached from the HTTP response. Best-effort steps (read/typing)
- * never abort the reply; a failed reply is logged safely.
+ * Handle an inbound user message: mark read, show typing, then reply based on
+ * the connect-code linking flow. Runs detached from the HTTP response.
+ * Best-effort steps (read/typing) never abort the reply; a failed reply is
+ * logged safely.
  */
 async function processInbound(message: InboundMessage): Promise<void> {
   const to = message.senderHandle;
@@ -99,12 +99,27 @@ async function processInbound(message: InboundMessage): Promise<void> {
     return;
   }
 
+  // Decide the reply from the linking state (in-memory, no AI, no DB).
+  const outcome = resolveInboundLink({
+    senderHandle: to,
+    text: message.content.text,
+    provider: message.provider,
+    channel: message.channel,
+  });
+
+  // Safe outcome log: masked sender + linking status only (no code, no text).
+  logger.info("sendblue.webhook link outcome", {
+    sender: maskHandle(to),
+    status: outcome.status,
+    codeMatched: outcome.codeMatched,
+  });
+
   // Best-effort presence signals — these must not block or fail the reply.
   await markRead(to);
   await sendTypingIndicator(to);
 
   try {
-    await sendMessage(to, CANNED_REPLY);
+    await sendMessage(to, outcome.reply);
   } catch (err) {
     logger.error("sendblue.webhook reply failed", {
       to: maskHandle(to),

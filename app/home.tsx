@@ -4,17 +4,18 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Redirect, useFocusEffect, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { hula } from '@/constants/theme';
+import { createLinkSession, MissingApiUrlError } from '@/lib/hulaApi';
 import {
   clearOnboardingComplete,
   clearOnboardingStage,
 } from '@/lib/onboarding';
 import { clearHulaPreview } from '@/lib/hulaPreview';
 import { getHulaProfile, type HulaProfile } from '@/lib/hulaProfile';
-import { resolveDisplayName, resolveInitials } from '@/lib/hulaUser';
+import { resolveDisplayName, resolveFirstName, resolveInitials } from '@/lib/hulaUser';
 import { clearOnboardingAnswers } from '@/lib/onboardingAnswers';
 
 const font = hula.typography.fontFamily;
@@ -40,10 +41,11 @@ const MENU_ROWS: readonly MenuRow[] = [
  */
 export default function Home() {
   const router = useRouter();
-  const { signOut, userId, isLoaded, isSignedIn } = useAuth();
+  const { signOut, getToken, userId, isLoaded, isSignedIn } = useAuth();
   const { user } = useUser();
 
   const [profile, setProfile] = useState<HulaProfile>({});
+  const [texting, setTexting] = useState(false);
 
   // Refresh the local name override on focus so a name edited in Settings shows
   // here on return.
@@ -66,6 +68,40 @@ export default function Home() {
     // Sign out only. We do NOT clear onboarding flags here.
     await signOut();
     router.replace('/');
+  };
+
+  // "Text hula": ask the backend for a one-time connect code, then open Messages
+  // to the Hula line with the prefilled connect text. The user only presses send
+  // — they never type the code themselves.
+  const onTextHula = async () => {
+    if (texting) return;
+    setTexting(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error('Not signed in');
+
+      const firstName = resolveFirstName(user, profile.displayName);
+      const { hulaNumber, messageBody } = await createLinkSession(token, { firstName });
+
+      // iOS uses `&` between the number and query; Android uses `?`.
+      const separator = Platform.OS === 'ios' ? '&' : '?';
+      const url = `sms:${hulaNumber}${separator}body=${encodeURIComponent(messageBody)}`;
+
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) throw new Error('Messages is not available on this device');
+      await Linking.openURL(url);
+    } catch (err) {
+      if (__DEV__) {
+        console.warn('[Text hula] failed:', err);
+      }
+      const message =
+        err instanceof MissingApiUrlError
+          ? 'Hula backend URL is not configured. Set EXPO_PUBLIC_HULA_API_URL and restart Expo.'
+          : "Couldn't start your Hula connect message. Please try again.";
+      Alert.alert('Text hula', message);
+    } finally {
+      setTexting(false);
+    }
   };
 
   // Once Clerk resolves a signed-out session (e.g. after Sign Out / delete),
@@ -148,7 +184,8 @@ export default function Home() {
             </Pressable>
 
             <Pressable
-              onPress={() => {}}
+              onPress={onTextHula}
+              disabled={texting}
               style={({ pressed }) => [styles.actionBtn, pressed && styles.pressed]}
             >
               <Ionicons name="chatbubble-outline" size={20} color={hula.glow.blueBright} />

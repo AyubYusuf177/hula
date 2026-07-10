@@ -1,5 +1,6 @@
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import { Ionicons } from '@expo/vector-icons';
+import * as Contacts from 'expo-contacts';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -7,6 +8,7 @@ import { useCallback, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { HULA_CONTACT_NAME, HULA_NUMBER } from '@/constants/hula';
 import { hula } from '@/constants/theme';
 import {
   DISCOVERY_OPTIONS,
@@ -91,6 +93,25 @@ export default function Settings() {
 
   const comingSoon = () =>
     Alert.alert('Coming soon', 'This will be available in a future update.');
+
+  // Open the native iOS "new contact" sheet prefilled with Hula's name + number,
+  // so the user can save Hula to their contacts in one tap.
+  const addHulaToContacts = async () => {
+    try {
+      const contact: Contacts.Contact = {
+        contactType: Contacts.ContactTypes.Person,
+        name: HULA_CONTACT_NAME,
+        firstName: HULA_CONTACT_NAME,
+        phoneNumbers: [{ label: 'mobile', number: HULA_NUMBER }],
+      };
+      await Contacts.presentFormAsync(null, contact, { isNew: true });
+    } catch (err) {
+      if (__DEV__) {
+        console.warn('[Add hula to Contacts] failed:', err);
+      }
+      Alert.alert('Add hula to Contacts', "Couldn't open the contact form. Please try again.");
+    }
+  };
 
   const onSignOut = async () => {
     // Sign out only. We do NOT clear onboarding storage here.
@@ -198,7 +219,7 @@ export default function Settings() {
             onPress={comingSoon}
           />
           <Divider />
-          <Row icon="person-add-outline" label="Add hula to Contacts" onPress={comingSoon} />
+          <Row icon="person-add-outline" label="Add hula to Contacts" onPress={addHulaToContacts} />
           <Divider />
           <Row icon="time-outline" label="Chat History" onPress={comingSoon} />
         </Section>

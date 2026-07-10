@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 
 import { healthRouter } from "./routes/health";
+import { linkSessionsRouter } from "./routes/linkSessions";
 import { sendblueWebhookRouter } from "./routes/webhooks";
 
 /**
@@ -14,6 +15,7 @@ export function createApp(): Express {
 
   // Routes
   app.use(healthRouter);
+  app.use(linkSessionsRouter);
   app.use(sendblueWebhookRouter);
 
   return app;
