@@ -1,3 +1,4 @@
+import type { BrainMessage } from "../ai/hulaBrain";
 import { getOrCreateUserByClerkId } from "../users/store";
 import { getPrisma } from "./prisma";
 
@@ -96,6 +97,55 @@ export async function listRecentMessagesForUser(params: {
     conversationId: row.conversationId,
     createdAt: row.createdAt.toISOString(),
   }));
+}
+
+/** Default number of recent turns loaded as short-term memory for the brain. */
+export const DEFAULT_BRAIN_HISTORY_LIMIT = 16;
+
+/** A stored message row as needed to build brain history. */
+interface BrainMessageRow {
+  direction: "inbound" | "outbound";
+  text: string | null;
+}
+
+/**
+ * Pure: map stored rows to oldest-first brain turns. Inbound → `user`,
+ * outbound → `assistant`; rows with no text are dropped. `rows` are expected
+ * newest-first (as queried) and are reversed so the result ends with the most
+ * recent turn. Pure and DB-free so it can be unit tested.
+ */
+export function mapRowsToBrainMessages(rows: BrainMessageRow[]): BrainMessage[] {
+  const result: BrainMessage[] = [];
+  // Reverse into oldest-first order for the model.
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row) continue;
+    const text = row.text?.trim();
+    if (!text) continue;
+    result.push({
+      role: row.direction === "inbound" ? "user" : "assistant",
+      text,
+    });
+  }
+  return result;
+}
+
+/**
+ * Load the most recent turns for a conversation as short-term memory for the
+ * brain. Returns oldest-first turns (ending with the latest message). Scoped to
+ * a single conversation so no other thread's content can leak in.
+ */
+export async function listRecentBrainMessages(
+  conversationId: string,
+  limit: number = DEFAULT_BRAIN_HISTORY_LIMIT,
+): Promise<BrainMessage[]> {
+  const rows = await getPrisma().message.findMany({
+    where: { conversationId },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: { direction: true, text: true },
+  });
+  return mapRowsToBrainMessages(rows);
 }
 
 /**

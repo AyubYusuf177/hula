@@ -27,6 +27,13 @@ const envSchema = z.object({
   // Model / AI provider — placeholder, not wired yet
   MODEL_PROVIDER_API_KEY: z.string().optional(),
 
+  // Anthropic (Hula brain provider) — Section 6.
+  // The key is OPTIONAL so the server still boots without it; when it is absent
+  // the brain uses a safe fallback reply instead of crashing. The model has a
+  // safe default so a missing/blank value never breaks a request.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().min(1).optional().default("claude-opus-4-8"),
+
   // Database (Postgres / Neon) — used by Prisma from Section 4 on.
   // DATABASE_URL is the pooled runtime connection; DIRECT_URL is the direct
   // (unpooled) connection Prisma may need for migrations. Both are optional here

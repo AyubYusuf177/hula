@@ -13,8 +13,11 @@ import {
 } from "../channels/sendblue/normalize";
 import type { SendblueInboundWebhook } from "../channels/sendblue/types";
 import type { InboundMessage } from "../channels/types";
+import { generateHulaReply } from "../ai/hulaBrain";
+import type { BrainMessage } from "../ai/hulaBrain";
 import { env } from "../config/env";
 import { recordInbound, recordOutbound } from "../db/persist";
+import { listRecentBrainMessages } from "../db/queries";
 import { resolveInboundLink } from "../users/linking";
 import { logger } from "../utils/logger";
 
@@ -23,9 +26,17 @@ import { logger } from "../utils/logger";
  *
  * Sendblue POSTs inbound messages (and outbound status callbacks) here. We must
  * acknowledge with a 2xx within 45 seconds, so the handler responds immediately
- * and then processes the message on a detached async task. Replies come from the
- * connect-code linking flow (see `users/linking`) — still no AI. As of Section 4
- * linking state and messages are persisted to Postgres (see `db/persist`).
+ * and then processes the message on a detached async task.
+ *
+ * Reply routing (Section 6):
+ *   - Connect-code and unknown-sender messages keep their DETERMINISTIC replies
+ *     from the linking flow (see `users/linking`) and never call the AI brain.
+ *   - A NORMAL message from an already-linked sender is answered by the Hula
+ *     brain (Anthropic Claude, see `ai/hulaBrain`), with a safe fallback reply
+ *     if the provider is unavailable.
+ *
+ * Linking state and all inbound/outbound messages are persisted to Postgres
+ * (see `db/persist`); the brain reads recent turns back via `db/queries`.
  */
 export const sendblueWebhookRouter = Router();
 
@@ -82,10 +93,46 @@ function logInboundSummary(message: InboundMessage): void {
 }
 
 /**
- * Handle an inbound user message: mark read, show typing, then reply based on
- * the connect-code linking flow. Runs detached from the HTTP response.
- * Best-effort steps (read/typing) never abort the reply; a failed reply is
- * logged safely.
+ * Decide the reply text for an already-linked normal message by calling the Hula
+ * brain. Loads recent conversation turns as short-term memory; if persistence
+ * gave us no conversation (or the load fails), falls back to the current message
+ * text so the brain still has the user's latest turn. Never throws — the brain
+ * itself resolves any provider failure to a safe fallback reply.
+ */
+async function generateBrainReply(
+  message: InboundMessage,
+  conversationId: string | null,
+): Promise<{ reply: string; usedFallback: boolean; historyCount: number }> {
+  let history: BrainMessage[] = [];
+  if (conversationId) {
+    try {
+      history = await listRecentBrainMessages(conversationId);
+    } catch (err) {
+      logger.error("sendblue.webhook brain history load failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+    }
+  }
+
+  // If nothing was loaded (no conversation / load failed), seed with the current
+  // message text so the brain always has the user's latest turn.
+  if (history.length === 0 && message.content.text) {
+    history = [{ role: "user", text: message.content.text }];
+  }
+
+  const { reply, usedFallback } = await generateHulaReply({
+    history,
+    context: { channel: message.channel },
+  });
+  return { reply, usedFallback, historyCount: history.length };
+}
+
+/**
+ * Handle an inbound user message: mark read, show typing, then reply. A normal
+ * message from an already-linked sender is answered by the Hula brain; every
+ * other case keeps its deterministic linking reply. Runs detached from the HTTP
+ * response. Best-effort steps (read/typing) never abort the reply; a failed
+ * reply is logged safely.
  */
 async function processInbound(message: InboundMessage): Promise<void> {
   const to = message.senderHandle;
@@ -128,8 +175,21 @@ async function processInbound(message: InboundMessage): Promise<void> {
   await markRead(to);
   await sendTypingIndicator(to);
 
+  // Normal messages from linked users get an AI reply; connect-code and unknown
+  // sender flows keep their deterministic linking reply (no brain call).
+  let replyText = outcome.reply;
+  if (outcome.brainEligible) {
+    const brain = await generateBrainReply(message, conversationId);
+    replyText = brain.reply;
+    logger.info("sendblue.webhook brain reply", {
+      sender: maskHandle(to),
+      usedFallback: brain.usedFallback,
+      historyCount: brain.historyCount,
+    });
+  }
+
   try {
-    const response = await sendMessage(to, outcome.reply);
+    const response = await sendMessage(to, replyText);
     // Persist the outbound reply (best-effort; failures never affect delivery).
     await recordOutbound({
       conversationId,
@@ -137,7 +197,7 @@ async function processInbound(message: InboundMessage): Promise<void> {
       channel: message.channel,
       provider: message.provider,
       recipientHandle: to,
-      text: outcome.reply,
+      text: replyText,
       providerMessageId:
         typeof response.message_handle === "string"
           ? response.message_handle

@@ -18,6 +18,13 @@ Channel-agnostic backend for the Hula AI messaging agent.
   signed-in user can verify their own stored messages before the AI brain exists.
   No schema change. Still no AI, integrations, reminders, billing, WhatsApp, or
   chat-history UI.
+- **Section 6** — the first Hula "brain". A **normal** message from an
+  already-linked sender is now answered by Anthropic Claude with a short, useful
+  reply that reads recent conversation history for short-term memory. The
+  connect-code and unknown-sender flows stay **deterministic** and never call the
+  model. If Anthropic is unavailable, a safe fallback reply is sent. No schema
+  change. Still no integrations, reminders, billing, WhatsApp, actions/tools, or
+  frontend/chat-history UI.
 
 The server is fully separate from the Expo app and runs independently.
 
@@ -295,6 +302,87 @@ never the other user's), then deletes everything it created. It **skips** with a
 notice when `DATABASE_URL` is unset, requires no real Sendblue, and prints no
 secrets.
 
+## Section 6 — the Hula brain (Anthropic Claude)
+
+Section 6 adds the smallest useful AI pipeline. When an **already-linked** sender
+texts a **normal** (non-code) message, the webhook loads recent conversation
+turns, asks Anthropic Claude for a short reply, saves it, and sends it back.
+
+### Anthropic environment variables
+
+Add these to `server/.env` (see `.env.example` for the shapes):
+
+| Variable            | Purpose                                                            |
+| ------------------- | ------------------------------------------------------------------ |
+| `ANTHROPIC_API_KEY` | Server-only Anthropic key. **Optional** — absent → fallback reply. |
+| `ANTHROPIC_MODEL`   | Model id. **Optional**, defaults to `claude-opus-4-8`.             |
+
+The key is read only on the server and is never logged or returned. The current
+model is **`claude-opus-4-8`**.
+
+### Reply routing — which flows call Claude
+
+| Situation                                             | Handled by            |
+| ----------------------------------------------------- | --------------------- |
+| Already-linked sender, normal (non-code) message      | **Claude** (the brain)|
+| Unknown sender (no valid code)                        | Deterministic reply   |
+| Valid connect code (fresh link)                       | Deterministic reply   |
+| Owner re-sends their own code / any code attempt      | Deterministic reply   |
+| Invalid / expired / used code                         | Deterministic reply   |
+
+Only a normal message from a linked user reaches the model. Any message that
+carries a connect-code pattern (valid or not), and any message from an unknown
+sender, keeps its exact Section 3 deterministic reply and never calls Claude.
+
+### The brain
+
+- Input: the last ~16 stored turns for that conversation (short-term memory),
+  mapped to `user`/`assistant` roles, plus lightweight channel context. No
+  onboarding profile sync or long-term memory summaries yet.
+- Output: plain text only — concise, direct, honest about what Hula can't yet do
+  (no integrations/actions/reminders). Usually 1–6 short sentences.
+- The system prompt never mentions any backend/vendor internals.
+
+### Fallback behaviour
+
+If the key is missing, the model is unreachable, the request errors or rate
+limits, or the reply is empty, the brain logs a **safe** (masked, no-secret)
+error and Hula sends:
+
+> I’m connected and listening. My brain is being upgraded right now.
+
+The webhook still returns its fast `2xx` and never crashes.
+
+### Message persistence
+
+The inbound message is saved first (as before). For a brain-answered turn the
+generated reply is saved once as the **outbound** `Message` (the same single
+`recordOutbound` used by the deterministic flows — no duplicate messages or
+conversations). Both directions remain visible via `GET /v1/me/messages`.
+
+### End-to-end test (text Hula from a linked thread)
+
+1. Start the backend (`npm run dev`), start ngrok, confirm `GET /health` via the
+   ngrok URL returns `{ "ok": true }`.
+2. From the already-linked iMessage thread, text: `What can you help me with today?`
+   → Hula replies with a real, helpful Claude answer (not just "You're connected").
+3. Text: `Help me plan my next 3 hours.` → Hula returns a short, useful plan.
+4. **Restart the backend** and text again → Hula still recognises the sender and
+   replies with a Claude-generated answer (persistence + linking survive restart).
+5. Confirm both inbound and outbound turns appear via `GET /v1/me/messages`.
+
+If `ANTHROPIC_API_KEY` is unset, steps 2–4 return the fallback reply instead — the
+connect-code and unknown-sender flows are unchanged either way.
+
+### Offline brain check (no network, no DB)
+
+`npm test` includes `scripts/brain.test.ts`, which covers routing (which flows
+call the brain), history preparation, prompt safety (no internals leak), and the
+fallback path — all with an injected fake generator, so no real Anthropic call is
+made. `npm run test:brain` is a **manual** script that calls the real brain with a
+small fake history (uses `ANTHROPIC_API_KEY` if present, else the fallback path)
+and prints only the reply text.
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -302,8 +390,9 @@ secrets.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalization + linking + query tests.|
+| `npm test`                 | Offline normalize + linking + query + brain tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
+| `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -340,6 +429,10 @@ src/
     messagingIdentity.ts#   sender handle -> Hula user (DB-backed)
     linking.ts          #   pure decideLinkOutcome + DB-backed resolveInboundLink
   conversations/        # Conversation + Message types
+  ai/                   # the Hula brain (Section 6)
+    anthropicClient.ts  #   minimal Anthropic Messages API client (fetch, no SDK)
+    hulaBrain.ts        #   generateHulaReply + history/message shaping + fallback
+    prompts.ts          #   dedicated Hula system prompt (no internals leak)
   media/                # media / voice note placeholders
   agent/                # AgentContext, ToolDefinition, prompt layers
   reminders/            # proactive reminder placeholders
@@ -360,9 +453,11 @@ prisma/
 
 ## Not implemented yet (by design)
 
-- Model / AI provider calls (replies are fixed strings)
+- Tool/action execution — the brain can think, plan, and draft, but cannot yet
+  run integrations, send emails, book things, or set real reminders
+- Onboarding profile sync into the brain and long-term memory summaries
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
-- Integrations, billing, WhatsApp, reminders
+- Integrations, billing, WhatsApp, reminders, chat-history/frontend UI
 
 These arrive in later sections.

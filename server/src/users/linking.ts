@@ -113,17 +113,35 @@ export function decideLinkOutcome(params: {
 }
 
 /**
+ * Pure routing rule for the Hula brain (Section 6): a message should reach the
+ * AI brain ONLY when the sender is already linked AND the message carries no
+ * connect-code pattern (a normal, non-code message). Every other case — unknown
+ * sender, a fresh/valid code, or any code attempt (valid, invalid, expired, or
+ * used) — stays deterministic and must NOT call the brain. No I/O; unit-testable.
+ */
+export function isNormalLinkedMessage(params: {
+  existingUserId: string | undefined;
+  hadCode: boolean;
+}): boolean {
+  return Boolean(params.existingUserId) && !params.hadCode;
+}
+
+/**
  * Resolve how to handle an inbound message for linking. Loads the current link
  * state from the database, applies the pure decision, performs any side effects,
  * and returns the outcome (including the resolved Hula user id when known). The
  * caller is responsible for actually sending `reply`.
+ *
+ * `brainEligible` tells the caller whether this is a normal message from an
+ * already-linked user (and so should be answered by the AI brain) rather than a
+ * deterministic connect-flow reply.
  */
 export async function resolveInboundLink(params: {
   senderHandle: string;
   text: string | undefined;
   provider: Provider;
   channel: Channel;
-}): Promise<LinkOutcome & { userId?: string }> {
+}): Promise<LinkOutcome & { userId?: string; brainEligible: boolean }> {
   const { senderHandle, text, provider, channel } = params;
 
   const existing = await getLinkedIdentity(senderHandle);
@@ -133,6 +151,13 @@ export async function resolveInboundLink(params: {
   const decision = decideLinkOutcome({
     existingUserId: existing?.userId,
     sessionUserId: session?.userId,
+  });
+
+  // Normal message from an already-linked sender → the brain answers it. Any
+  // code attempt (even invalid/expired) keeps the deterministic connect reply.
+  const brainEligible = isNormalLinkedMessage({
+    existingUserId: existing?.userId,
+    hadCode: code !== undefined,
   });
 
   // Apply side effects based on the decision.
@@ -154,6 +179,7 @@ export async function resolveInboundLink(params: {
     status: decision.status,
     reply: decision.reply,
     codeMatched: decision.codeMatched,
+    brainEligible,
     ...(userId ? { userId } : {}),
   };
 }
