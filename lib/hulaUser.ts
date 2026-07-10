@@ -29,6 +29,21 @@ export function resolveDisplayName(user: ClerkUserLike, override?: string | null
   return 'User';
 }
 
+/**
+ * Resolves just the first name, honouring a local override first. Used to
+ * personalize the "Text hula" connect message. Returns `undefined` when nothing
+ * usable is available (so the backend can fall back to "me").
+ */
+export function resolveFirstName(user: ClerkUserLike, override?: string | null): string | undefined {
+  const fromOverride = override?.trim().split(/\s+/)[0];
+  if (fromOverride) return fromOverride;
+  const first = user?.firstName?.trim();
+  if (first) return first;
+  const fromFull = user?.fullName?.trim().split(/\s+/)[0];
+  if (fromFull) return fromFull;
+  return undefined;
+}
+
 /** Two-letter initials derived from the resolved display name (or email). */
 export function resolveInitials(user: ClerkUserLike, override?: string | null): string {
   const name = override?.trim()

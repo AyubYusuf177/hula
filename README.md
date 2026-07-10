@@ -10,7 +10,21 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npm install
    ```
 
-2. Start the app
+2. Configure environment
+
+   Copy `.env.example` to `.env` and fill in the values (see the table below).
+   These are read at build time, so restart Expo with `npx expo start -c` after
+   any change.
+
+   | Variable                            | Purpose                                                        |
+   | ----------------------------------- | -------------------------------------------------------------- |
+   | `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk publishable key (public).                                |
+   | `EXPO_PUBLIC_HULA_API_URL`          | Base URL of the Hula backend (e.g. ngrok) for "Text hula".     |
+
+   No secret keys ever live in the app — only `EXPO_PUBLIC_*` values, which are
+   safe to ship in the client bundle.
+
+3. Start the app
 
    ```bash
    npx expo start
