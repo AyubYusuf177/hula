@@ -27,8 +27,14 @@ const envSchema = z.object({
   // Model / AI provider — placeholder, not wired yet
   MODEL_PROVIDER_API_KEY: z.string().optional(),
 
-  // Database — placeholder, not connected yet
+  // Database (Postgres / Neon) — used by Prisma from Section 4 on.
+  // DATABASE_URL is the pooled runtime connection; DIRECT_URL is the direct
+  // (unpooled) connection Prisma may need for migrations. Both are optional here
+  // so the server can still boot and run pure-logic tests without a database;
+  // Prisma reads them from the environment directly (see prisma/schema.prisma)
+  // and will fail loudly at query time if DATABASE_URL is missing.
   DATABASE_URL: z.string().optional(),
+  DIRECT_URL: z.string().optional(),
 
   // Auth (Clerk) — placeholder, not wired yet
   CLERK_SECRET_KEY: z.string().optional(),

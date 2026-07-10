@@ -1,11 +1,12 @@
 /**
- * Database schema DRAFT (types only).
+ * Database schema DRAFT (types only) — for the not-yet-persisted feature areas.
  *
- * Section 1: NO real database is connected. This file documents the intended
- * persistence model as a typed draft so we agree on shapes before choosing an
- * ORM/driver later (Prisma/Drizzle/etc.). Each entity type already lives in its
- * feature folder; here we collect them into one schema view plus a table-name
- * registry.
+ * The core messaging models (users, messaging identities, link sessions,
+ * conversations, messages, provider events) are now REAL and live in
+ * `prisma/schema.prisma` as of Section 4. This file remains a typed design
+ * artifact for the tables that are still unimplemented (media, reminders,
+ * integrations, actions, billing, legal). Nothing here reads or writes a
+ * database — use the Prisma client (`db/prisma.ts`) for real persistence.
  */
 import type { ActionApproval } from "../actions/types";
 import type { Subscription } from "../billing/types";
@@ -15,7 +16,7 @@ import type { LegalConsent } from "../legal/types";
 import type { StoredMedia } from "../media/types";
 import type { Reminder } from "../reminders/types";
 import type { LinkSession } from "../users/linkSessions";
-import type { MessagingIdentity } from "../users/messagingIdentity";
+import type { LinkedIdentity } from "../users/messagingIdentity";
 import type { UserProfile } from "../users/types";
 
 /** Logical tables the backend will eventually persist. */
@@ -41,7 +42,7 @@ export type TableName = (typeof TABLES)[keyof typeof TABLES];
  */
 export interface DatabaseSchema {
   users: UserProfile;
-  messaging_identities: MessagingIdentity;
+  messaging_identities: LinkedIdentity;
   link_sessions: LinkSession;
   conversations: Conversation;
   messages: Message;
