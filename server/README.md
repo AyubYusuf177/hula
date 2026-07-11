@@ -531,6 +531,114 @@ curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/messaging-status \
 # From a fresh/unconnected account, tapping "Text hula" still prefills a new code.
 ```
 
+## Section 8 — explicit long-term memory
+
+Section 8 gives Hula a small, conservative, **user-controlled** long-term memory,
+similar in spirit to ChatGPT/Claude memory but deliberately minimal. It works
+entirely through **natural iMessage commands** — there is no memory UI, and Hula
+never extracts memories automatically from normal chat.
+
+- **Remember** — when the user explicitly asks, Hula saves a short, stable fact
+  or preference and confirms it.
+- **List** — the user can ask what Hula remembers and get a numbered list.
+- **Forget** — the user can remove one memory or clear everything. Deletes are
+  **soft** (the row is deactivated, never destroyed).
+- Normal replies use active memories **lightly** — Hula personalises without
+  reciting or announcing them (unless the user asks what it remembers).
+
+Only a **linked** sender's normal (non-connect-code) messages are checked for
+memory commands. Connect-code and unknown-sender flows are unchanged. Memory
+commands are handled **deterministically** in the backend and do **not** call the
+Anthropic brain.
+
+### Supported commands
+
+| Intent   | Example phrasings                                                         |
+| -------- | ------------------------------------------------------------------------ |
+| Remember | `remember …`, `please remember …`, `don't forget …`, `save this …`, `keep in mind …` |
+| List     | `what do you remember about me?`, `what have you remembered?`, `show my memories`, `list my memories` |
+| Forget   | `forget …`, `delete that memory …`, `remove that memory …`               |
+| Forget all | `forget everything you remember about me`, `clear my memory`            |
+
+### Memory policy
+
+**Allowed** (when explicitly requested): communication/assistant-behaviour
+preferences, projects/goals, routines, non-sensitive likes/dislikes, and
+practical constraints — including sensitive-adjacent ones such as
+dietary/religious/health/accessibility needs (e.g. _"Remember I'm Muslim and
+don't eat pork"_, _"Remember I'm lactose intolerant"_, _"Remember I avoid
+alcohol"_).
+
+**Blocked** (even if asked): passwords/API keys/secrets, bank/card details,
+government IDs, precise home address, evasion/illegal-concealment instructions,
+and long bare number sequences (card/account/ID-like). Blocked requests get:
+
+> I can keep that in mind for this chat, but I won’t save it as long-term memory.
+
+Hula does **not** infer sensitive facts automatically — mentioning prayer,
+medication, or politics once never creates a memory. Memory is only created from
+an explicit "remember" command.
+
+### Example iMessage flows
+
+```txt
+You:  Remember I prefer blunt, concise replies.
+Hula: Got it — I’ll remember that you prefer blunt, concise replies.
+
+You:  Remember I’m Muslim and don’t eat pork.
+Hula: Got it — I’ll remember that you're Muslim and don't eat pork.
+
+You:  What do you remember about me?
+Hula: I remember:
+      1. You prefer blunt, concise replies.
+      2. You're Muslim and don't eat pork.
+
+You:  Forget that I prefer blunt replies.
+Hula: Done — I forgot that.
+
+You:  Forget everything you remember about me.
+Hula: Done — I cleared your saved memories.
+```
+
+### Inspect your memories (Clerk-guarded, read-only)
+
+**`GET /v1/me/memories`** — the signed-in user's active memories only, scoped to
+that user. **`DELETE /v1/me/memories/:id`** soft-deletes one of your own.
+
+```jsonc
+// GET /v1/me/memories → 200 OK
+{
+  "memories": [
+    {
+      "id": "…",
+      "type": "preference",
+      "text": "You prefer blunt, concise replies.",
+      "importance": "medium",
+      "createdAt": "2026-07-11T13:00:00.000Z",
+      "updatedAt": "2026-07-11T13:00:00.000Z"
+    }
+  ]
+}
+```
+
+### Verify it
+
+```bash
+# Offline unit tests (classification, sanitisation, policy, phrasing, prompt).
+npm test               # includes scripts/memory.test.ts
+
+# DB-backed end-to-end helper check (skips without DATABASE_URL; cleans up).
+npm run test:memory
+
+# While signed in, read back your own saved memories:
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/memories \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+```
+
+**Limitations (by design):** no automatic memory extraction, no memory UI, no
+embeddings/vector search (matching is simple keyword overlap), and no reminders,
+integrations, WhatsApp, or tools/actions.
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -538,9 +646,10 @@ curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/messaging-status \
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
+| `npm run test:memory`      | DB-backed memory check (skips w/o DB URL; cleans up).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -560,7 +669,7 @@ src/
 
   routes/webhooks.ts    # POST /webhooks/sendblue (inbound + code linking)
   routes/linkSessions.ts# POST /v1/link-sessions (Section 3, Clerk-guarded)
-  routes/me.ts          # GET /v1/me/messages + /conversations (S5) + /v1/me/profile GET/PUT (S7)
+  routes/me.ts          # /v1/me/messages + /conversations (S5), /profile (S7), /memories (S8)
   auth/clerk.ts         # Clerk token verification + requireClerkAuth middleware
 
   channels/             # channel-agnostic messaging core
@@ -577,6 +686,7 @@ src/
     messagingIdentity.ts#   sender handle -> Hula user (DB-backed)
     linking.ts          #   pure decideLinkOutcome + DB-backed resolveInboundLink
     profile.ts          #   safe profile sanitise/upsert/query + brain context (Section 7)
+    memory.ts           #   explicit long-term memory: commands, policy, helpers (Section 8)
   conversations/        # Conversation + Message types
   ai/                   # the Hula brain (Section 6)
     anthropicClient.ts  #   minimal Anthropic Messages API client (fetch, no SDK)
@@ -604,8 +714,9 @@ prisma/
 
 - Tool/action execution — the brain can think, plan, and draft, but cannot yet
   run integrations, send emails, book things, or set real reminders
-- Long-term memory summaries (Section 7 adds lightweight profile context to the
-  brain, but no rolling memory/summarisation yet)
+- Automatic memory extraction / embeddings — Section 8 adds explicit,
+  user-commanded long-term memory (keyword-matched), but Hula never mines normal
+  chat for memories and there is no vector search or memory UI yet
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
 - Integrations, billing, WhatsApp, reminders, chat-history/frontend UI

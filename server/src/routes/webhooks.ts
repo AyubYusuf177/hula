@@ -20,6 +20,7 @@ import { recordInbound, recordOutbound } from "../db/persist";
 import { listRecentBrainMessages } from "../db/queries";
 import { resolveInboundLink } from "../users/linking";
 import { loadBrainContextForUser } from "../users/profile";
+import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
 import type { HulaPromptContext } from "../ai/prompts";
 import { logger } from "../utils/logger";
 
@@ -136,6 +137,11 @@ async function generateBrainReply(
         reason: err instanceof Error ? err.message : "unknown error",
       });
     }
+
+    // Load explicit long-term memories (Section 8) so the brain can use them
+    // lightly. `buildMemoryContext` is best-effort and never throws.
+    const memories = await buildMemoryContext(userId);
+    if (memories.length > 0) context = { ...context, memories };
   }
 
   const { reply, usedFallback } = await generateHulaReply({ history, context });
@@ -194,17 +200,29 @@ async function processInbound(message: InboundMessage): Promise<void> {
   // sender flows keep their deterministic linking reply (no brain call).
   let replyText = outcome.reply;
   if (outcome.brainEligible) {
-    const brain = await generateBrainReply(
-      message,
-      conversationId,
-      outcome.userId ?? null,
-    );
-    replyText = brain.reply;
-    logger.info("sendblue.webhook brain reply", {
-      sender: maskHandle(to),
-      usedFallback: brain.usedFallback,
-      historyCount: brain.historyCount,
-    });
+    const userId = outcome.userId ?? null;
+
+    // Explicit memory commands ("remember …", "forget …", "what do you
+    // remember") are handled DETERMINISTICALLY and never call the brain.
+    const memory = userId
+      ? await handleMemoryCommand(userId, message.content.text)
+      : { handled: false as const };
+
+    if (memory.handled && memory.reply) {
+      replyText = memory.reply;
+      logger.info("sendblue.webhook memory command", {
+        sender: maskHandle(to),
+        intent: memory.intent,
+      });
+    } else {
+      const brain = await generateBrainReply(message, conversationId, userId);
+      replyText = brain.reply;
+      logger.info("sendblue.webhook brain reply", {
+        sender: maskHandle(to),
+        usedFallback: brain.usedFallback,
+        historyCount: brain.historyCount,
+      });
+    }
   }
 
   try {

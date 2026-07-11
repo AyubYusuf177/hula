@@ -50,6 +50,11 @@ export interface HulaPromptContext {
   country?: string;
   /** The channel the message arrived on (e.g. "imessage"). */
   channel?: string;
+  /**
+   * Explicit long-term memories the user asked Hula to remember (Section 8),
+   * already phrased as direct "You …" statements. Used lightly.
+   */
+  memories?: string[];
 }
 
 /**
@@ -122,10 +127,27 @@ export function buildHulaSystemPrompt(context?: HulaPromptContext): string {
 
   if (context.channel) lines.push(`This conversation is over ${context.channel}.`);
 
-  if (lines.length === 0) return HULA_SYSTEM_PROMPT;
+  const sections: string[] = [HULA_SYSTEM_PROMPT];
 
-  return `${HULA_SYSTEM_PROMPT}
+  if (lines.length > 0) {
+    sections.push(
+      `Context for this user (use it lightly and naturally — personalise, but never announce what you know about them or mention onboarding/profiles):
+${lines.join("\n")}`,
+    );
+  }
 
-Context for this user (use it lightly and naturally — personalise, but never announce what you know about them or mention onboarding/profiles):
-${lines.join("\n")}`;
+  // Explicit long-term memory (Section 8). Unlike profile context, the user
+  // asked for these directly, so Hula may acknowledge them when asked what it
+  // remembers — but should still use them naturally rather than reciting them.
+  const memories = (context.memories ?? []).filter((m) => m.trim().length > 0);
+  if (memories.length > 0) {
+    sections.push(
+      `Things the user has explicitly asked you to remember about them (each is written as a direct "you" statement about the user). Use them naturally when relevant; only bring them up unprompted if it clearly helps:
+${memories.map((m) => `- ${m}`).join("\n")}`,
+    );
+  }
+
+  if (sections.length === 1) return HULA_SYSTEM_PROMPT;
+
+  return sections.join("\n\n");
 }

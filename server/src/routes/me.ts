@@ -12,10 +12,15 @@ import {
 } from "../db/queries";
 import { getMessagingStatus } from "../users/messagingIdentity";
 import {
+  listActiveMemoriesForUser,
+  softDeleteMemory,
+} from "../users/memory";
+import {
   getUserProfile,
   sanitizeProfileInput,
   upsertUserProfile,
 } from "../users/profile";
+import { getOrCreateUserByClerkId } from "../users/store";
 import { logger } from "../utils/logger";
 
 /** Fallback Hula line if the env value isn't configured (matches Section 3). */
@@ -31,6 +36,8 @@ const DEFAULT_HULA_NUMBER = "+16465480761";
  *
  *   GET /v1/me/messages       — recent inbound/outbound messages (newest first)
  *   GET /v1/me/conversations  — conversation summaries with message counts
+ *   GET /v1/me/memories       — active explicit long-term memories (Section 8)
+ *   DELETE /v1/me/memories/:id — soft-delete one of the user's own memories
  */
 export const meRouter = Router();
 
@@ -126,6 +133,49 @@ meRouter.get("/v1/me/messaging-status", requireClerkAuth, async (req, res) => {
       reason: err instanceof Error ? err.message : "unknown error",
     });
     res.status(500).json({ error: "messaging_status_query_failed" });
+  }
+});
+
+meRouter.get("/v1/me/memories", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const memories = await listActiveMemoriesForUser(user.id);
+    // Safe log: count only, never the memory text or the user id.
+    logger.info("me.memories served", { count: memories.length });
+    res.status(200).json({ memories });
+  } catch (err) {
+    logger.error("me.memories failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "memories_query_failed" });
+  }
+});
+
+meRouter.delete("/v1/me/memories/:id", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+  const memoryId = req.params.id;
+
+  if (!memoryId) {
+    res.status(400).json({ error: "missing_memory_id" });
+    return;
+  }
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const deleted = await softDeleteMemory(user.id, memoryId);
+    logger.info("me.memories deleted", { deleted });
+    if (!deleted) {
+      res.status(404).json({ error: "memory_not_found" });
+      return;
+    }
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    logger.error("me.memories delete failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "memory_delete_failed" });
   }
 });
 

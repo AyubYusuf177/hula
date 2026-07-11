@@ -39,6 +39,30 @@ enum MessageDirection {
   outbound
 }
 
+/// Kind of an explicit long-term memory (Section 8).
+enum MemoryType {
+  preference
+  fact
+  instruction
+  goal
+  project
+  routine
+  constraint
+}
+
+/// Whether a memory is currently active or has been soft-deleted (Section 8).
+enum MemoryStatus {
+  active
+  deleted
+}
+
+/// How much a memory should weigh when personalising replies (Section 8).
+enum MemoryImportance {
+  low
+  medium
+  high
+}
+
 /// A Hula account, keyed off the Clerk user id.
 model User {
   id          String  @id @default(cuid())
@@ -51,6 +75,7 @@ model User {
   linkSessions  LinkSession[]
   conversations Conversation[]
   messages      Message[]
+  memories      Memory[]
 
   @@map("users")
 }
@@ -169,4 +194,33 @@ model ProviderEvent {
 
   @@index([providerMessageId])
   @@map("provider_events")
+}
+
+/// An explicit, user-requested long-term memory (Section 8).
+///
+/// Only created when the user clearly asks Hula to remember something (source is
+/// always `explicit_user_request`). Deletes are SOFT (status → deleted) so a
+/// "forget" is reversible in the data and never destroys history. No automatic
+/// extraction, embeddings, or raw chat is stored here — just short, sanitised
+/// facts/preferences the user asked Hula to keep.
+model Memory {
+  id         String           @id @default(cuid())
+  userId     String
+  type       MemoryType       @default(fact)
+  text       String
+  source     String           @default("explicit_user_request")
+  status     MemoryStatus     @default(active)
+  confidence Float            @default(1.0)
+  tags       Json?
+  importance MemoryImportance @default(medium)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  deletedAt  DateTime?
+  lastUsedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([userId, type, status])
+  @@map("memories")
 }
