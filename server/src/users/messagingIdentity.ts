@@ -110,6 +110,47 @@ export async function linkIdentity(params: {
 const DEFAULT_STATUS_PROVIDER: Provider = "sendblue";
 
 /**
+ * A user's active identity in a form the reminder worker can actually send to.
+ * Unlike `getImessageStatusForUser`, this returns the UNMASKED handle because it
+ * is used internally to deliver a proactive message — it is never exposed to the
+ * app or logged in full.
+ */
+export interface SendableIdentity {
+  /** Raw handle to send to (e.g. "+16465480761"). */
+  handle: string;
+  channel: Channel;
+  provider: Provider;
+}
+
+/**
+ * Resolve the most recently linked ACTIVE identity for an internal user id in a
+ * sendable form, or `null` when none exists. Used by the reminder worker to
+ * deliver proactive iMessages.
+ */
+export async function getSendableIdentityForUser(
+  userId: string,
+): Promise<SendableIdentity | null> {
+  const identity = await getPrisma().messagingIdentity.findFirst({
+    where: { userId, status: "active" },
+    orderBy: { linkedAt: "desc" },
+    select: {
+      channel: true,
+      provider: true,
+      handleDisplay: true,
+      handleNormalized: true,
+    },
+  });
+  if (!identity) return null;
+  const handle = identity.handleDisplay ?? identity.handleNormalized;
+  if (!handle) return null;
+  return {
+    handle,
+    channel: (identity.channel as Channel) || "imessage",
+    provider: (identity.provider as Provider) || DEFAULT_STATUS_PROVIDER,
+  };
+}
+
+/**
  * Pure: mask a sender handle for display so the app never receives the full
  * phone number or email. Phones keep only their last four digits (e.g.
  * "+16465480761" → "+*******0761"); emails keep only the first character of the

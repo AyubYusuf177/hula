@@ -21,6 +21,7 @@ import { listRecentBrainMessages } from "../db/queries";
 import { resolveInboundLink } from "../users/linking";
 import { loadBrainContextForUser } from "../users/profile";
 import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
+import { handleReminderCommand } from "../reminders/reminders";
 import type { HulaPromptContext } from "../ai/prompts";
 import { logger } from "../utils/logger";
 
@@ -208,11 +209,25 @@ async function processInbound(message: InboundMessage): Promise<void> {
       ? await handleMemoryCommand(userId, message.content.text)
       : { handled: false as const };
 
+    // Explicit reminder commands ("remind me …", "what reminders do I have",
+    // "cancel my … reminder") are handled DETERMINISTICALLY after memory and
+    // before the brain — they never call Anthropic.
+    const reminder =
+      userId && !(memory.handled && memory.reply)
+        ? await handleReminderCommand(userId, message.content.text)
+        : { handled: false as const };
+
     if (memory.handled && memory.reply) {
       replyText = memory.reply;
       logger.info("sendblue.webhook memory command", {
         sender: maskHandle(to),
         intent: memory.intent,
+      });
+    } else if (reminder.handled && reminder.reply) {
+      replyText = reminder.reply;
+      logger.info("sendblue.webhook reminder command", {
+        sender: maskHandle(to),
+        intent: reminder.intent,
       });
     } else {
       const brain = await generateBrainReply(message, conversationId, userId);

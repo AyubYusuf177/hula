@@ -63,6 +63,23 @@ enum MemoryImportance {
   high
 }
 
+/// Where a reminder originated (Section 9). Only `explicit_user_request` is used
+/// today — the `future_*` values reserve space for integration-sourced reminders
+/// (Calendar/Zoom/Gmail/etc.) without needing a schema change later.
+enum ReminderSource {
+  explicit_user_request
+  future_calendar
+  future_integration
+}
+
+/// Lifecycle of a reminder (Section 9).
+enum ReminderStatus {
+  scheduled
+  sent
+  cancelled
+  failed
+}
+
 /// A Hula account, keyed off the Clerk user id.
 model User {
   id          String  @id @default(cuid())
@@ -76,6 +93,7 @@ model User {
   conversations Conversation[]
   messages      Message[]
   memories      Memory[]
+  reminders     Reminder[]
 
   @@map("users")
 }
@@ -223,4 +241,45 @@ model Memory {
   @@index([userId, status])
   @@index([userId, type, status])
   @@map("memories")
+}
+
+/// An explicit, user-requested reminder (Section 9).
+///
+/// Only created when the user clearly asks Hula to remind them of something
+/// ("remind me …"); `source` is always `explicit_user_request` today. There is
+/// NO automatic inference from ordinary messages. A conservative local worker
+/// (see `reminders/worker`) delivers due reminders proactively over iMessage via
+/// Sendblue using DETERMINISTIC text — no Anthropic call is made to deliver a
+/// reminder. Recurrence is limited to daily/weekly for now (`recurrenceRule` is
+/// a compact "daily"/"weekly" string; `dueAt`/`nextRunAt` carry the actual
+/// time-of-day and weekday). One-off reminders are marked `sent` after delivery;
+/// recurring reminders advance `nextRunAt`.
+model Reminder {
+  id             String         @id @default(cuid())
+  userId         String
+  source         ReminderSource @default(explicit_user_request)
+  channel        String         @default("imessage")
+  provider       String         @default("sendblue")
+  title          String
+  body           String?
+  originalText   String?
+  status         ReminderStatus @default(scheduled)
+  dueAt          DateTime
+  timezone       String?
+  recurrenceRule String?
+  nextRunAt      DateTime?
+  lastSentAt     DateTime?
+  sendCount      Int            @default(0)
+  maxSends       Int            @default(1)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  cancelledAt    DateTime?
+  failureReason  String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([status, nextRunAt])
+  @@index([status, dueAt])
+  @@map("reminders")
 }

@@ -16,6 +16,10 @@ import {
   softDeleteMemory,
 } from "../users/memory";
 import {
+  cancelReminderById,
+  listActiveRemindersForUser,
+} from "../reminders/reminders";
+import {
   getUserProfile,
   sanitizeProfileInput,
   upsertUserProfile,
@@ -38,6 +42,8 @@ const DEFAULT_HULA_NUMBER = "+16465480761";
  *   GET /v1/me/conversations  — conversation summaries with message counts
  *   GET /v1/me/memories       — active explicit long-term memories (Section 8)
  *   DELETE /v1/me/memories/:id — soft-delete one of the user's own memories
+ *   GET /v1/me/reminders      — active scheduled reminders (Section 9)
+ *   DELETE /v1/me/reminders/:id — cancel one of the user's own reminders
  */
 export const meRouter = Router();
 
@@ -176,6 +182,49 @@ meRouter.delete("/v1/me/memories/:id", requireClerkAuth, async (req, res) => {
       reason: err instanceof Error ? err.message : "unknown error",
     });
     res.status(500).json({ error: "memory_delete_failed" });
+  }
+});
+
+meRouter.get("/v1/me/reminders", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const reminders = await listActiveRemindersForUser(user.id);
+    // Safe log: count only, never the reminder text or the user id.
+    logger.info("me.reminders served", { count: reminders.length });
+    res.status(200).json({ reminders });
+  } catch (err) {
+    logger.error("me.reminders failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "reminders_query_failed" });
+  }
+});
+
+meRouter.delete("/v1/me/reminders/:id", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+  const reminderId = req.params.id;
+
+  if (!reminderId) {
+    res.status(400).json({ error: "missing_reminder_id" });
+    return;
+  }
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const cancelled = await cancelReminderById(user.id, reminderId);
+    logger.info("me.reminders cancelled", { cancelled });
+    if (!cancelled) {
+      res.status(404).json({ error: "reminder_not_found" });
+      return;
+    }
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    logger.error("me.reminders delete failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "reminder_delete_failed" });
   }
 });
 

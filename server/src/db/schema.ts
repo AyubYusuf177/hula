@@ -4,8 +4,9 @@
  * The core messaging models (users, messaging identities, link sessions,
  * conversations, messages, provider events) are now REAL and live in
  * `prisma/schema.prisma` as of Section 4. This file remains a typed design
- * artifact for the tables that are still unimplemented (media, reminders,
- * integrations, actions, billing, legal). Nothing here reads or writes a
+ * artifact for the tables that are still unimplemented (media, integrations,
+ * actions, billing, legal). Reminders are REAL as of Section 9 (see
+ * `prisma/schema.prisma`). Nothing here reads or writes a
  * database — use the Prisma client (`db/prisma.ts`) for real persistence.
  */
 import type { ActionApproval } from "../actions/types";
@@ -14,7 +15,7 @@ import type { Conversation, Message } from "../conversations/types";
 import type { UserIntegration } from "../integrations/types";
 import type { LegalConsent } from "../legal/types";
 import type { StoredMedia } from "../media/types";
-import type { Reminder } from "../reminders/types";
+import type { ReminderView } from "../reminders/types";
 import type { LinkSession } from "../users/linkSessions";
 import type { LinkedIdentity } from "../users/messagingIdentity";
 import type { UserProfile } from "../users/types";
@@ -47,7 +48,7 @@ export interface DatabaseSchema {
   conversations: Conversation;
   messages: Message;
   media: StoredMedia;
-  reminders: Reminder;
+  reminders: ReminderView;
   user_integrations: UserIntegration;
   action_approvals: ActionApproval;
   subscriptions: Subscription;

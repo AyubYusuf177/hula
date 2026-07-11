@@ -636,8 +636,158 @@ curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/memories \
 ```
 
 **Limitations (by design):** no automatic memory extraction, no memory UI, no
-embeddings/vector search (matching is simple keyword overlap), and no reminders,
+embeddings/vector search (matching is simple keyword overlap), and no
 integrations, WhatsApp, or tools/actions.
+
+## Section 9 — explicit reminders + a lightweight follow-up engine
+
+Section 9 is Hula's **first proactive** feature. When the user **explicitly**
+asks, Hula schedules a reminder, confirms it, and later delivers it as a
+proactive iMessage — all through **natural iMessage commands**. There is no
+reminders UI, and Hula never infers reminders from ordinary chat.
+
+It is deliberately conservative (every proactive message has a trust and cost
+cost): explicit reminders only, deterministic delivery text (no Anthropic call
+to send a reminder), strong caps, and daily/weekly recurrence at most. The
+`future_calendar`/`future_integration` reminder **sources** reserve space for
+integration-driven reminders (Calendar/Zoom/Gmail/…) later **without** building
+any of that now.
+
+Only a **linked** sender's normal messages are checked for reminder commands.
+Connect-code and unknown-sender flows are unchanged. Reminder commands are
+handled **deterministically** and run **after** memory commands and **before**
+the brain — so memory always takes precedence and neither calls Claude.
+
+### Supported commands
+
+| Intent      | Example phrasings                                                              |
+| ----------- | ----------------------------------------------------------------------------- |
+| Create      | `remind me to go gym tomorrow at 7pm`, `remind me in 30 minutes to call Rob`, `remind me tonight to submit the form`, `remind me every Monday at 9am to plan my week`, `can you remind me …`, `follow up with me tomorrow about …` |
+| List        | `what reminders do I have?`, `show my reminders`, `list my reminders`          |
+| Cancel one  | `cancel my gym reminder`, `delete the form reminder`, `stop reminding me about the form` |
+| Cancel all  | `cancel all reminders`, `stop reminding me`                                    |
+
+### Date/time parsing (deterministic, no NLP library)
+
+Parsing is small and predictable — anything it can't confidently read makes Hula
+ask **one** clarifying question rather than guess. Supported:
+
+| Phrase                 | Meaning                                            |
+| ---------------------- | -------------------------------------------------- |
+| `in 10 minutes` / `in 2 hours` | relative offset from now                   |
+| `tonight`              | today at **8:00 PM** local                         |
+| `today at 6pm`         | today at that local time                           |
+| `tomorrow at 7pm`      | next day at that local time                        |
+| `Monday at 9am`        | next occurrence of that weekday (one-off)          |
+| `every day at 8am`     | **daily** recurrence                               |
+| `every Monday at 9am`  | **weekly** recurrence                              |
+
+Times use the user's **timezone** from their profile (Section 7) when known,
+computed with the built-in `Intl` API (no new dependency). **Fallback:** if the
+user has no stored timezone, times are interpreted in **UTC**.
+
+Hula asks for clarification when:
+
+- there's **no time** (`remind me to call Rob` → _"What time should I remind
+  you?"_) — including bare `tomorrow`/a weekday with no time,
+- there's a time but **no task** (`remind me tomorrow at 7pm` → _"What should I
+  remind you about?"_),
+- the recurrence is **too frequent** (`every minute`/`every hour` → _"I can only
+  do daily or weekly reminders for now …"_) — minimum recurrence is **daily**,
+- the time is **already in the past** (`today at 6pm` when it's 8pm).
+
+### Delivery worker
+
+A conservative in-process poller (`reminders/worker.ts`) starts on boot and every
+**30s** looks for due reminders (`status = scheduled`, `nextRunAt <= now`):
+
+- delivers each as a proactive iMessage to the user's active messaging identity,
+- uses **deterministic** text — `Reminder: {title}` (`+ body` when present) — so
+  **no Anthropic call** happens on delivery,
+- marks **one-off** reminders `sent`; **advances** `nextRunAt` for recurring ones,
+- is safe across restarts and **won't double-send** (status-guarded atomic claim
+  + overlapping-tick guard),
+- marks a reminder `failed` (with a reason) if there's no active identity or the
+  send throws — conservative, no infinite retries.
+
+### Cost / spam controls
+
+- **≤ 10** reminders delivered per worker tick.
+- **≤ 50** active reminders per user (further creates get a "hit the limit" reply).
+- Minimum recurrence is **daily**; more frequent is rejected.
+- Recurring reminders auto-complete after **365** sends (cost bound).
+- Titles capped at 200 chars; delivery text is fixed and Claude-free.
+
+### Example iMessage flow
+
+```txt
+You:  Remind me in 2 minutes to test Hula reminders.
+Hula: Got it — I’ll remind you in 2 minutes: test Hula reminders.
+      … (2 minutes later, proactively) …
+Hula: Reminder: test Hula reminders
+
+You:  Remind me tomorrow at 7pm to go gym.
+Hula: Got it — I’ll remind you tomorrow at 7:00 PM: go gym.
+
+You:  What reminders do I have?
+Hula: Your active reminders:
+      1. go gym — Jul 12 at 7:00 PM
+
+You:  Cancel my gym reminder.
+Hula: Done — I cancelled that reminder.
+```
+
+### Inspect your reminders (Clerk-guarded)
+
+**`GET /v1/me/reminders`** — the signed-in user's active reminders only.
+**`DELETE /v1/me/reminders/:id`** cancels one of your own. No frontend UI yet.
+
+```jsonc
+// GET /v1/me/reminders → 200 OK
+{
+  "reminders": [
+    {
+      "id": "…",
+      "title": "go gym",
+      "body": null,
+      "status": "scheduled",
+      "dueAt": "2026-07-12T23:00:00.000Z",
+      "nextRunAt": "2026-07-12T23:00:00.000Z",
+      "recurrenceRule": null,
+      "timezone": "America/New_York",
+      "createdAt": "2026-07-11T13:00:00.000Z"
+    }
+  ]
+}
+```
+
+### Verify it
+
+```bash
+# Offline unit tests (classification, parsing, recurrence, phrasing, matching).
+npm test                 # includes scripts/reminders.test.ts
+
+# DB-backed worker check (skips without DATABASE_URL; stubs the sender so NO
+# real iMessage is sent; cleans up its throwaway data).
+npm run test:reminders
+
+# While signed in, read back your own active reminders:
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/reminders \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+```
+
+**End-to-end (real iMessage):** start the backend + ngrok, then from a linked
+thread text `Remind me in 2 minutes to test Hula reminders.` You'll get the
+confirmation immediately and the proactive `Reminder: …` about two minutes later.
+
+**Future plan:** the same worker + `Reminder` model will later back
+integration-sourced reminders (Google Calendar meetings, Zoom calls, Gmail
+follow-ups, Notion/Asana tasks, travel/delivery updates) via the `future_*`
+sources — none of which are built yet.
+
+**Limitations (by design):** no Google Calendar, Zoom, Gmail, Notion, or
+WhatsApp; no automatic follow-up inference; no reminders/chat-history/frontend
+UI; and no Anthropic call for due-reminder delivery.
 
 ## Scripts
 
@@ -646,10 +796,11 @@ integrations, WhatsApp, or tools/actions.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run test:memory`      | DB-backed memory check (skips w/o DB URL; cleans up).|
+| `npm run test:reminders`   | DB-backed reminder worker check (skips w/o DB URL; stubs sender; cleans up).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -669,7 +820,7 @@ src/
 
   routes/webhooks.ts    # POST /webhooks/sendblue (inbound + code linking)
   routes/linkSessions.ts# POST /v1/link-sessions (Section 3, Clerk-guarded)
-  routes/me.ts          # /v1/me/messages + /conversations (S5), /profile (S7), /memories (S8)
+  routes/me.ts          # /v1/me/messages + /conversations (S5), /profile (S7), /memories (S8), /reminders (S9)
   auth/clerk.ts         # Clerk token verification + requireClerkAuth middleware
 
   channels/             # channel-agnostic messaging core
@@ -694,7 +845,11 @@ src/
     prompts.ts          #   dedicated Hula system prompt (no internals leak)
   media/                # media / voice note placeholders
   agent/                # AgentContext, ToolDefinition, prompt layers
-  reminders/            # proactive reminder placeholders
+  reminders/            # explicit reminders (Section 9)
+    types.ts            #   shared reminder types (source/status/recurrence/view)
+    parse.ts            #   pure date/time + timezone parsing (Intl, no deps)
+    reminders.ts        #   command classify, title/phrasing, DB helpers, orchestrator
+    worker.ts           #   conservative delivery worker (deterministic text)
   integrations/         # Integration types + registry (empty)
   actions/              # ActionApproval placeholders
   billing/              # Subscription placeholders
@@ -713,12 +868,15 @@ prisma/
 ## Not implemented yet (by design)
 
 - Tool/action execution — the brain can think, plan, and draft, but cannot yet
-  run integrations, send emails, book things, or set real reminders
+  run integrations, send emails, or book things
 - Automatic memory extraction / embeddings — Section 8 adds explicit,
   user-commanded long-term memory (keyword-matched), but Hula never mines normal
   chat for memories and there is no vector search or memory UI yet
+- Automatic follow-up inference / integration-sourced reminders — Section 9 adds
+  **explicit** reminders + a delivery worker; Hula never guesses reminders, and
+  Calendar/Zoom/Gmail/Notion sources are reserved (`future_*`) but not built
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
-- Integrations, billing, WhatsApp, reminders, chat-history/frontend UI
+- Integrations, billing, WhatsApp, chat-history/frontend/reminders UI
 
 These arrive in later sections.
