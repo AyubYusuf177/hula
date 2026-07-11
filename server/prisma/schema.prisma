@@ -104,6 +104,31 @@ enum OAuthStateStatus {
   expired
 }
 
+/// Lifecycle of an action proposal (Section 12). A confirmable action starts
+/// `proposed`; a matching natural-language "yes" moves it to `confirmed` and then
+/// `executed`/`failed`; a "no"/"cancel" moves it to `rejected`/`cancelled`;
+/// unanswered proposals `expire`. Confirmation is single-use and never standing.
+enum ActionProposalStatus {
+  proposed
+  confirmed
+  rejected
+  expired
+  executed
+  failed
+  cancelled
+}
+
+/// Lifecycle of an action execution attempt (Section 12). `blocked` means policy
+/// refused it (e.g. not connected, not enabled, needs confirmation). Real write
+/// actions do not run yet — only Google Calendar reads succeed today.
+enum ActionExecutionStatus {
+  pending
+  running
+  succeeded
+  failed
+  blocked
+}
+
 /// A Hula account, keyed off the Clerk user id.
 model User {
   id          String  @id @default(cuid())
@@ -123,6 +148,9 @@ model User {
   integrationEvents      IntegrationEvent[]
   integrationActionLogs  IntegrationActionLog[]
   integrationOAuthStates IntegrationOAuthState[]
+
+  actionProposals  ActionProposal[]
+  actionExecutions ActionExecution[]
 
   @@map("users")
 }
@@ -468,4 +496,68 @@ model IntegrationOAuthState {
 
   @@index([userId, provider, status])
   @@map("integration_oauth_states")
+}
+
+// --- Section 12: agentic action runtime ----------------------------------
+//
+// The typed action runtime every future integration plugs into. The model never
+// calls a provider directly: it (or a deterministic detector) names a typed Hula
+// action, the policy engine validates it, confirmable actions become a proposal
+// the user confirms in iMessage, and only then does the executor run a provider
+// adapter (today, only Google Calendar READS run). Both tables store SANITISED
+// summaries only — never a token, never a raw provider payload.
+
+/// A pending, user-scoped intent to run a confirmable action. Carries a human
+/// `previewText` and expires quickly (see `PROPOSAL_TTL_MS`). A natural-language
+/// "yes" confirms ONLY the single active, non-expired proposal for that user.
+model ActionProposal {
+  id                   String               @id @default(cuid())
+  userId               String
+  provider             String?
+  actionId             String
+  status               ActionProposalStatus @default(proposed)
+  riskLevel            String
+  confirmationRequired Boolean              @default(true)
+  /// Redacted action input (JSON). Never contains tokens or raw provider data.
+  inputJson            Json?
+  previewText          String
+  expiresAt            DateTime
+  confirmedAt          DateTime?
+  rejectedAt           DateTime?
+  executedAt           DateTime?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  executions ActionExecution[]
+
+  @@index([userId, status])
+  @@index([status, expiresAt])
+  @@map("action_proposals")
+}
+
+/// A durable, audit-style record of an action Hula attempted — including ones
+/// BLOCKED by policy. Only sanitised summaries are stored; never a token or raw
+/// provider payload. This is the ledger the inspection endpoints read back.
+model ActionExecution {
+  id                 String                @id @default(cuid())
+  userId             String
+  proposalId         String?
+  provider           String?
+  actionId           String
+  status             ActionExecutionStatus @default(pending)
+  requestSummaryJson Json?
+  resultSummaryJson  Json?
+  errorMessage       String?
+  providerRequestId  String?
+  providerResourceId String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  proposal ActionProposal? @relation(fields: [proposalId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([proposalId])
+  @@map("action_executions")
 }

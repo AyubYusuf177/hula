@@ -1027,6 +1027,99 @@ npm run test:google-calendar
 create/edit/delete; no Google push webhooks; no automatic calendar reminders; no
 frontend integrations UI.
 
+## Section 12 — Agentic action runtime
+
+Section 12 is the **typed action runtime** every future integration plugs into.
+Its guiding principle is research-driven: **the model never calls a provider API
+directly.** The language model (or a small deterministic detector) only ever
+*names* a typed Hula action; the deterministic backend does the rest.
+
+**Why a runtime (not "let the model call the API"):** a model that can hit
+provider APIs directly can hallucinate access, skip consent, and take
+irreversible actions. Routing every action through one deterministic gate makes
+high-impact actions impossible-by-default and gives us a single place to enforce
+policy, confirmation, and an audit trail.
+
+The flow for any action:
+
+1. **Name** a typed action (e.g. `calendar.createEvent`) from the registry.
+2. **Validate** it against policy — connection, scopes/capabilities, risk.
+3. **Confirm** if required — a proposal the user approves in iMessage.
+4. **Execute** through a provider adapter **only** when `implemented + enabled`
+   and policy allows.
+5. **Log** a sanitised execution to the ledger (never a token/raw payload).
+6. **Reply** honestly — Hula never claims an action happened unless it did.
+
+### Pieces
+
+- **Action registry** (`actions/registry.ts`) — the typed catalog: `actionId`,
+  category, `providerTypes`, required scopes/capabilities, `riskLevel`
+  (`read | draft | write | send | purchase | destructive`), `confirmationRequired`,
+  `implemented`, `enabled`, a lightweight input schema, examples, and an honest
+  `userFacingDescription`. Most actions are **stubs** (`implemented: false`).
+- **Policy engine** (`actions/policy.ts`) — pure `evaluateActionForUser(action,
+  ctx)`. Blocks unimplemented/disabled actions, missing connections, missing
+  scopes, and (via the Section 10 risk gate) purchases/destructive actions;
+  flags when confirmation is required. Returns `{ allowed, needsConfirmation,
+  needsConnection, needsScope, blockedReason?, userMessage? }`.
+- **Proposals** (`actions/proposals.ts`) + **ledger** (`actions/executions.ts`) —
+  a proposal is a pending, user-scoped, **10-minute** intent to run a confirmable
+  action. A natural-language "yes" confirms **only** the single active proposal —
+  never standing consent. Executions are an append-only audit trail.
+- **Executor** (`actions/executor.ts`) — the single execution path. Applies
+  policy, runs an adapter only for implemented reads, logs, and returns an honest
+  message. Dependencies are injectable so it unit-tests with no DB/network.
+- **Confirmation + detection** (`actions/confirmations.ts`, `actions/detect.ts`) —
+  pure phrase classifiers wired into the iMessage flow. "yes"/"do it"/"cancel"
+  resolve the active proposal; imperative "schedule … at 7pm" / "send an email
+  to …" / "create a task …" map to actions and get an honest "not enabled yet"
+  reply (so a create request isn't mistaken for a calendar read, and the brain
+  never pretends).
+
+### Implemented vs stubbed now
+
+- **Implemented (read-only):** `calendar.listEvents`, `calendar.findNextEvent` —
+  back onto the Section 11 Google Calendar read helper when connected.
+- **Stubbed (contract ready, not enabled):** `calendar.createEvent` /
+  `updateEvent` / `cancelEvent`, `email.search` / `createDraft` / `sendDraft`,
+  `task.create` / `complete`, `document.search` / `appendText`,
+  `slack.postMessage`, `shopping.createList`. Each returns an honest reply and a
+  `blocked` ledger entry. **No provider write/send/purchase action runs.**
+
+### How a future provider plugs in
+
+Add its provider to the catalog (Section 10), flip the relevant action(s) to
+`implemented + enabled`, and give the executor an adapter branch. Policy,
+proposals, confirmation, and the ledger already apply — no new gate to build.
+
+### Inspection endpoints (backend-only, Clerk-guarded; no UI yet)
+
+```bash
+GET  /v1/me/actions/catalog                 # typed action registry (metadata)
+GET  /v1/me/actions/proposals               # your proposals
+GET  /v1/me/actions/executions              # your execution ledger (no tokens)
+POST /v1/me/actions/proposals/:id/confirm   # confirm + run one of YOUR proposals
+POST /v1/me/actions/proposals/:id/reject    # cancel one of YOUR proposals
+```
+
+### Verify it
+
+```bash
+# Offline unit tests: registry shape, policy (connection/scope/risk/confirmation),
+# confirm/cancel phrase detection, imperative intent detection, executor read path
+# (faked fetch, proves no token leak).
+npm test                       # includes scripts/actions.test.ts
+
+# DB-backed end-to-end check (skips without DATABASE_URL): proposal lifecycle,
+# confirm/expire/cancel, honest stub execution, a faked read execution, and that
+# the ledger holds no tokens. Requires the Section 12 migration applied. Cleans up.
+npm run test:actions
+```
+
+**Limitations (by design):** no provider write/send/purchase execution; no broad
+autonomous planning; no integrations or automations UI; only Google Calendar
+reads are live.
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -1034,13 +1127,14 @@ frontend integrations UI.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders + integrations + google-calendar tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders + integrations + google-calendar + actions tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run test:memory`      | DB-backed memory check (skips w/o DB URL; cleans up).|
 | `npm run test:reminders`   | DB-backed reminder worker check (skips w/o DB URL; stubs sender; cleans up).|
 | `npm run test:integrations`| DB-backed integration foundation check (skips w/o DB URL; fake token; cleans up).|
 | `npm run test:google-calendar`| Offline Google Calendar check + (with DB URL) token-vault/refresh check using a FAKE Google endpoint; cleans up.|
+| `npm run test:actions`     | DB-backed action runtime check (skips w/o DB URL; faked reads; cleans up).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -1104,7 +1198,16 @@ src/
       calendarQuestion.ts #   intent detection + deterministic answers + orchestrator
       types.ts          #     normalized event + raw Google shapes
     types.ts / registry.ts # legacy Section 1 agent-tool placeholders
-  actions/              # ActionApproval placeholders
+  actions/              # agentic action runtime (Section 12)
+    registry.ts         #   typed action catalog (metadata; most are stubs)
+    policy.ts           #   pure policy gate (connection/scope/risk/confirmation)
+    context.ts          #   build a safe policy context from connections (no tokens)
+    proposals.ts        #   confirmable-action proposal store (10-min, single-use)
+    executions.ts       #   append-only execution ledger (safe summaries only)
+    executor.ts         #   the single execute path (reads live; writes stubbed)
+    confirmations.ts    #   "yes"/"cancel" → resolve the active proposal
+    detect.ts           #   imperative intent detection → honest "not enabled yet"
+    types.ts            #   ActionApproval placeholders (Section 1)
   billing/              # Subscription placeholders
   legal/                # LegalConsent placeholders
   db/
@@ -1120,8 +1223,10 @@ prisma/
 
 ## Not implemented yet (by design)
 
-- Tool/action execution — the brain can think, plan, and draft, but cannot yet
-  run integrations, send emails, or book things
+- Provider **write/send/purchase** execution — Section 12 adds the typed action
+  runtime (registry, policy, proposal/confirmation, executor, ledger), but only
+  Google Calendar **reads** run; every write/send action is a stubbed contract
+  that replies honestly and cannot execute
 - Automatic memory extraction / embeddings — Section 8 adds explicit,
   user-commanded long-term memory (keyword-matched), but Hula never mines normal
   chat for memories and there is no vector search or memory UI yet

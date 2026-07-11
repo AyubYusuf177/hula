@@ -228,11 +228,16 @@ check("prompt: no connected apps → no integration line", () => {
   assert.ok(!/connected these apps/i.test(prompt), "should not mention connections");
 });
 
-check("prompt: connected apps render honestly (cannot act yet)", () => {
+check("prompt: connected apps render honestly (reads ok, writes off)", () => {
   const prompt = buildHulaSystemPrompt({ connectedProviders: ["Google Calendar"] });
   assert.ok(/connected these apps/i.test(prompt));
-  assert.ok(/cannot .*take actions|still cannot/i.test(prompt), "must stay honest");
   assert.ok(/Google Calendar/.test(prompt));
+  // Section 12: calendar READS are now honest-and-allowed, but writes/actions
+  // stay off and Hula must never claim it performed an action it can't.
+  assert.ok(
+    /never claim you (?:read|performed)|not turned on/i.test(prompt),
+    "must stay honest about un-enabled actions",
+  );
 });
 
 console.log(`\nAll ${passed} integration foundation tests passed.`);

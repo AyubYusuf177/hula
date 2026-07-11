@@ -16,6 +16,16 @@ import {
   disconnectIntegrationConnection,
   getUserIntegrationStatus,
 } from "../integrations/connections";
+import { listActionDefinitions } from "../actions/registry";
+import {
+  confirmProposal,
+  finalizeProposal,
+  getProposalForUser,
+  listProposalsForUser,
+  rejectProposal,
+} from "../actions/proposals";
+import { listExecutionsForUser } from "../actions/executions";
+import { executeAction } from "../actions/executor";
 import {
   listActiveMemoriesForUser,
   softDeleteMemory,
@@ -335,6 +345,138 @@ meRouter.post(
         reason: err instanceof Error ? err.message : "unknown error",
       });
       res.status(500).json({ error: "integration_disconnect_failed" });
+    }
+  },
+);
+
+// --- Section 12: agentic action runtime ----------------------------------
+//
+// Backend-only inspection + confirmation endpoints for the action runtime. No
+// frontend UI consumes these yet. A user only ever sees their OWN proposals and
+// executions; responses carry sanitised action metadata only — never a token or
+// a raw provider payload.
+
+meRouter.get("/v1/me/actions/catalog", requireClerkAuth, (_req, res) => {
+  // Static, non-sensitive action metadata (no user data, no secrets).
+  res.status(200).json({ actions: listActionDefinitions() });
+});
+
+meRouter.get("/v1/me/actions/proposals", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const proposals = await listProposalsForUser(user.id);
+    logger.info("me.actions.proposals served", { count: proposals.length });
+    res.status(200).json({ proposals });
+  } catch (err) {
+    logger.error("me.actions.proposals failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "proposals_query_failed" });
+  }
+});
+
+meRouter.get("/v1/me/actions/executions", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const executions = await listExecutionsForUser(user.id);
+    logger.info("me.actions.executions served", { count: executions.length });
+    res.status(200).json({ executions });
+  } catch (err) {
+    logger.error("me.actions.executions failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "executions_query_failed" });
+  }
+});
+
+meRouter.post(
+  "/v1/me/actions/proposals/:id/confirm",
+  requireClerkAuth,
+  async (req, res) => {
+    const clerkUserId = req.clerkUserId as string;
+    const proposalId = req.params.id;
+    if (!proposalId) {
+      res.status(400).json({ error: "missing_proposal_id" });
+      return;
+    }
+
+    try {
+      const user = await getOrCreateUserByClerkId(clerkUserId);
+      const existing = await getProposalForUser(user.id, proposalId);
+      if (!existing) {
+        res.status(404).json({ error: "proposal_not_found" });
+        return;
+      }
+      if (existing.status !== "proposed") {
+        res.status(409).json({ error: "proposal_not_pending", status: existing.status });
+        return;
+      }
+      if (new Date(existing.expiresAt).getTime() <= Date.now()) {
+        res.status(409).json({ error: "proposal_expired" });
+        return;
+      }
+
+      const confirmed = await confirmProposal(user.id, proposalId);
+      if (!confirmed) {
+        res.status(409).json({ error: "proposal_not_pending" });
+        return;
+      }
+
+      const result = await executeAction(user.id, existing.actionId, {
+        input: existing.input ?? undefined,
+        userConfirmed: true,
+        proposalId,
+      });
+      await finalizeProposal(user.id, proposalId, result.ok ? "executed" : "failed");
+
+      logger.info("me.actions.confirm", { actionId: existing.actionId, ok: result.ok });
+      res.status(200).json({
+        ok: result.ok,
+        status: result.status,
+        message: result.userMessage,
+      });
+    } catch (err) {
+      logger.error("me.actions.confirm failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+      res.status(500).json({ error: "proposal_confirm_failed" });
+    }
+  },
+);
+
+meRouter.post(
+  "/v1/me/actions/proposals/:id/reject",
+  requireClerkAuth,
+  async (req, res) => {
+    const clerkUserId = req.clerkUserId as string;
+    const proposalId = req.params.id;
+    if (!proposalId) {
+      res.status(400).json({ error: "missing_proposal_id" });
+      return;
+    }
+
+    try {
+      const user = await getOrCreateUserByClerkId(clerkUserId);
+      const rejected = await rejectProposal(user.id, proposalId);
+      if (!rejected) {
+        // Either not found for this user, or already resolved.
+        const existing = await getProposalForUser(user.id, proposalId);
+        res
+          .status(existing ? 409 : 404)
+          .json({ error: existing ? "proposal_not_pending" : "proposal_not_found" });
+        return;
+      }
+      logger.info("me.actions.reject", { proposalId });
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      logger.error("me.actions.reject failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+      res.status(500).json({ error: "proposal_reject_failed" });
     }
   },
 );

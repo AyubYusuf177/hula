@@ -23,6 +23,8 @@ import { loadBrainContextForUser } from "../users/profile";
 import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
 import { listConnectedProviderNames } from "../integrations/connections";
 import { handleCalendarQuestion } from "../integrations/providers/googleCalendar/calendarQuestion";
+import { handleActionConfirmation } from "../actions/confirmations";
+import { handleActionIntent } from "../actions/detect";
 import { handleReminderCommand } from "../reminders/reminders";
 import type { HulaPromptContext } from "../ai/prompts";
 import { logger } from "../utils/logger";
@@ -233,14 +235,41 @@ async function processInbound(message: InboundMessage): Promise<void> {
         ? await handleReminderCommand(userId, message.content.text)
         : { handled: false as const };
 
-    // Calendar questions ("what's on my calendar today", "when's my next
-    // meeting") are answered from the user's connected Google Calendar (Section
-    // 11), read-only. Handled after memory/reminders and before the brain. If
-    // Google Calendar isn't connected, this replies honestly that it isn't.
-    const calendar =
+    // Action confirmations (Section 12). A short "yes"/"do it"/"cancel" resolves
+    // the user's single ACTIVE action proposal (if any). Runs before the calendar
+    // read and brain so a confirmation is never misrouted; a "yes" with no pending
+    // proposal is a no-op and falls through.
+    const confirmation =
       userId &&
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply)
+        ? await handleActionConfirmation(userId, message.content.text)
+        : { handled: false as const };
+
+    // Imperative action intents (Section 12) — "schedule … at 7pm", "send an
+    // email to …", "create a task …". These map to typed Hula actions; every
+    // write/send action is still a STUB, so the runtime replies HONESTLY that the
+    // action isn't enabled yet (and logs a blocked ledger entry) rather than
+    // pretending. Runs before the read-only calendar handler so an imperative
+    // "schedule …" isn't mistaken for a calendar question.
+    const actionIntent =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply)
+        ? await handleActionIntent(userId, message.content.text)
+        : { handled: false as const };
+
+    // Calendar questions ("what's on my calendar today", "when's my next
+    // meeting") are answered from the user's connected Google Calendar (Section
+    // 11), read-only. Handled after memory/reminders/actions and before the
+    // brain. If Google Calendar isn't connected, this replies honestly.
+    const calendar =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply) &&
+      !(actionIntent.handled && actionIntent.reply)
         ? await handleCalendarQuestion(userId, message.content.text)
         : { handled: false as const };
 
@@ -255,6 +284,18 @@ async function processInbound(message: InboundMessage): Promise<void> {
       logger.info("sendblue.webhook reminder command", {
         sender: maskHandle(to),
         intent: reminder.intent,
+      });
+    } else if (confirmation.handled && confirmation.reply) {
+      replyText = confirmation.reply;
+      logger.info("sendblue.webhook action confirmation", {
+        sender: maskHandle(to),
+        outcome: confirmation.outcome,
+      });
+    } else if (actionIntent.handled && actionIntent.reply) {
+      replyText = actionIntent.reply;
+      logger.info("sendblue.webhook action intent", {
+        sender: maskHandle(to),
+        actionId: actionIntent.actionId,
       });
     } else if (calendar.handled && calendar.reply) {
       replyText = calendar.reply;
