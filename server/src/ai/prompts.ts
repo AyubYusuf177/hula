@@ -55,6 +55,13 @@ export interface HulaPromptContext {
    * already phrased as direct "You …" statements. Used lightly.
    */
   memories?: string[];
+  /**
+   * Display names of external apps the user has actually connected (Section 10).
+   * Used only to keep Hula HONEST — Hula still cannot act on them yet, so this
+   * never lets Hula claim it performed an external action. Empty/absent today
+   * because no real provider connect flow exists.
+   */
+  connectedProviders?: string[];
 }
 
 /**
@@ -144,6 +151,16 @@ ${lines.join("\n")}`,
     sections.push(
       `Things the user has explicitly asked you to remember about them (each is written as a direct "you" statement about the user). Use them naturally when relevant; only bring them up unprompted if it clearly helps:
 ${memories.map((m) => `- ${m}`).join("\n")}`,
+    );
+  }
+
+  // Connected integrations (Section 10). Kept strictly honest: name the apps the
+  // user connected, but reinforce that Hula still cannot act on them yet, so it
+  // never claims to have read data or performed an action.
+  const connected = (context.connectedProviders ?? []).filter((p) => p.trim().length > 0);
+  if (connected.length > 0) {
+    sections.push(
+      `The user has connected these apps to Hula: ${connected.join(", ")}. You still cannot read their data or take actions in them yet — that ability is coming. You may acknowledge an app is connected, but never claim you accessed it or did something in it.`,
     );
   }
 

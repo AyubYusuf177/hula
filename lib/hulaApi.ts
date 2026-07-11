@@ -180,3 +180,114 @@ export async function syncMyProfile(
   const data = (await res.json()) as { profile: MyProfile };
   return data.profile;
 }
+
+// --- Integrations (Section 10) --------------------------------------------
+//
+// Typed helpers only — there is NO integrations UI yet. Tokens are never
+// exposed by the backend, so none of these ever return credential material.
+
+/** One provider's static catalog metadata (`GET /v1/me/integrations/catalog`). */
+export interface IntegrationCatalogEntry {
+  provider: string;
+  displayName: string;
+  category: string;
+  status: 'planned' | 'available_stub';
+  authType: 'oauth2' | 'api_key' | 'partner' | 'none';
+  defaultScopes: string[];
+  capabilities: string[];
+  notes: string;
+}
+
+/** The signed-in user's status for one provider (`GET /v1/me/integrations`). */
+export interface IntegrationStatus {
+  provider: string;
+  displayName: string;
+  category: string;
+  catalogStatus: 'planned' | 'available_stub';
+  authType: 'oauth2' | 'api_key' | 'partner' | 'none';
+  connectionStatus: 'disconnected' | 'connected' | 'expired' | 'revoked' | 'error';
+  connected: boolean;
+  providerAccountEmail: string | null;
+  connectedAt: string | null;
+  lastSyncedAt: string | null;
+}
+
+/** Fetch the provider catalog (static metadata, no user data). */
+export async function fetchIntegrationCatalog(
+  token: string,
+): Promise<IntegrationCatalogEntry[]> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(`${BASE_URL}/v1/me/integrations/catalog`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`me/integrations/catalog request failed (${res.status})`);
+  }
+
+  const data = (await res.json()) as { providers: IntegrationCatalogEntry[] };
+  return data.providers;
+}
+
+/** Fetch the signed-in user's integration statuses (scoped to them). */
+export async function fetchUserIntegrations(
+  token: string,
+): Promise<IntegrationStatus[]> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(`${BASE_URL}/v1/me/integrations`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`me/integrations request failed (${res.status})`);
+  }
+
+  const data = (await res.json()) as { integrations: IntegrationStatus[] };
+  return data.integrations;
+}
+
+/** Fetch the signed-in user's status for one provider. */
+export async function fetchIntegrationStatus(
+  token: string,
+  provider: string,
+): Promise<IntegrationStatus> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(`${BASE_URL}/v1/me/integrations/${provider}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`me/integrations/${provider} request failed (${res.status})`);
+  }
+
+  const data = (await res.json()) as { integration: IntegrationStatus };
+  return data.integration;
+}
+
+/**
+ * Mark a provider disconnected for the signed-in user. Idempotent — the backend
+ * returns `{ ok: true }` even if it was already disconnected.
+ */
+export async function disconnectIntegration(
+  token: string,
+  provider: string,
+): Promise<{ ok: boolean; changed: boolean }> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(
+    `${BASE_URL}/v1/me/integrations/${provider}/disconnect`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+
+  if (!res.ok) {
+    throw new Error(`me/integrations/${provider}/disconnect failed (${res.status})`);
+  }
+
+  return (await res.json()) as { ok: boolean; changed: boolean };
+}

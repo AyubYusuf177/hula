@@ -80,6 +80,19 @@ enum ReminderStatus {
   failed
 }
 
+/// Lifecycle of a user's connection to an external integration provider
+/// (Section 10). `disconnected` is the resting state; `connected` means an
+/// active grant; `expired`/`revoked`/`error` capture unhealthy states we may
+/// surface later. Real OAuth is NOT implemented yet — these values reserve the
+/// full lifecycle so the foundation doesn't need a schema change to grow.
+enum IntegrationConnectionStatus {
+  disconnected
+  connected
+  expired
+  revoked
+  error
+}
+
 /// A Hula account, keyed off the Clerk user id.
 model User {
   id          String  @id @default(cuid())
@@ -94,6 +107,10 @@ model User {
   messages      Message[]
   memories      Memory[]
   reminders     Reminder[]
+
+  integrationConnections IntegrationConnection[]
+  integrationEvents      IntegrationEvent[]
+  integrationActionLogs  IntegrationActionLog[]
 
   @@map("users")
 }
@@ -282,4 +299,134 @@ model Reminder {
   @@index([status, nextRunAt])
   @@index([status, dueAt])
   @@map("reminders")
+}
+
+// --- Section 10: integrations foundation ---------------------------------
+//
+// The models below are the CLEAN FOUNDATION for connecting external providers
+// (Google Calendar, Gmail, Zoom, Notion, Asana, Slack, aggregators like Nylas,
+// …). They are intentionally provider-agnostic: `provider` is a registry slug
+// (see `src/integrations/catalog.ts`), scopes/capabilities are additive JSON,
+// and provider tokens NEVER touch the mobile app — they live only in
+// `IntegrationCredential`, encrypted at rest (see `src/integrations/tokenVault`).
+//
+// No real OAuth, no provider data sync, and no action execution exist yet.
+
+/// A user's connection to one external integration provider. At most one row per
+/// (user, provider). `status` is the source of truth for whether Hula may read
+/// from that provider later; scopes are tracked exactly as granted/requested.
+model IntegrationConnection {
+  id                   String                      @id @default(cuid())
+  userId               String
+  provider             String
+  providerAccountId    String?
+  providerAccountEmail String?
+  displayName          String?
+  status               IntegrationConnectionStatus @default(disconnected)
+  /// Exact scopes the provider granted (string[] stored as JSON).
+  grantedScopes        Json?
+  /// Scopes we asked for (string[] stored as JSON); may differ from granted.
+  requestedScopes      Json?
+  /// Capability slugs this connection enables (string[] stored as JSON).
+  capabilities         Json?
+  connectedAt          DateTime?
+  disconnectedAt       DateTime?
+  lastSyncedAt         DateTime?
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+
+  user       User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credential IntegrationCredential?
+  syncStates IntegrationSyncState[]
+  events     IntegrationEvent[]
+  actionLogs IntegrationActionLog[]
+
+  @@unique([userId, provider])
+  @@index([userId, status])
+  @@map("integration_connections")
+}
+
+/// Server-only encrypted token store for a connection. The mobile app can NEVER
+/// read these columns — they are only ever handled inside the backend token
+/// vault. Tokens are encrypted (AES-256-GCM) before they are written here.
+model IntegrationCredential {
+  id                    String    @id @default(cuid())
+  connectionId          String    @unique
+  tokenType             String    @default("oauth")
+  encryptedAccessToken  String?
+  encryptedRefreshToken String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  /// Non-reversible hash of the granted scope set, for change detection.
+  scopeHash             String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  connection IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@map("integration_credentials")
+}
+
+/// Per-resource incremental-sync bookkeeping (cursors / sync tokens). Reserved
+/// for future provider syncs — nothing writes to it yet.
+model IntegrationSyncState {
+  id           String    @id @default(cuid())
+  connectionId String
+  resourceType String
+  cursor       String?
+  syncToken    String?
+  lastSyncedAt DateTime?
+  status       String?
+  errorMessage String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  connection IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, resourceType])
+  @@map("integration_sync_states")
+}
+
+/// A safe, redacted summary of an integration-sourced event (a webhook, a synced
+/// change, a lifecycle event). Raw provider payloads are intentionally NOT
+/// stored — only a sanitised summary. Audit-style: survives disconnects.
+model IntegrationEvent {
+  id              String   @id @default(cuid())
+  userId          String
+  connectionId    String?
+  provider        String
+  eventType       String
+  resourceType    String?
+  providerEventId String?
+  safeSummaryJson Json?
+  createdAt       DateTime @default(now())
+
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connection IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, provider, createdAt])
+  @@map("integration_events")
+}
+
+/// An audit record of an action Hula attempted on a provider on the user's
+/// behalf. No real actions run yet; this is the durable audit trail the future
+/// action policy (see `src/integrations/policy.ts`) will write to. Only
+/// sanitised summaries are stored — never raw provider payloads or tokens.
+model IntegrationActionLog {
+  id                 String   @id @default(cuid())
+  userId             String
+  connectionId       String?
+  provider           String
+  actionType         String
+  status             String
+  requestSummaryJson Json?
+  resultSummaryJson  Json?
+  errorMessage       String?
+  createdAt          DateTime @default(now())
+
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connection IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, provider, createdAt])
+  @@map("integration_action_logs")
 }

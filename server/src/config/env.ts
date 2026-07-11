@@ -46,6 +46,12 @@ const envSchema = z.object({
   // Auth (Clerk) — placeholder, not wired yet
   CLERK_SECRET_KEY: z.string().optional(),
 
+  // Integrations token vault (Section 10) — OPTIONAL. Only required the moment a
+  // provider token is actually encrypted/decrypted (no real provider connects
+  // yet, so the server boots fine without it). Must decode to a 32-byte key
+  // (base64 or hex) when set; the token vault validates it lazily at use time.
+  INTEGRATION_TOKEN_ENCRYPTION_KEY: z.string().optional(),
+
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),
 });

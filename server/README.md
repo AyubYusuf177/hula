@@ -789,6 +789,129 @@ sources — none of which are built yet.
 WhatsApp; no automatic follow-up inference; no reminders/chat-history/frontend
 UI; and no Anthropic call for due-reminder delivery.
 
+## Section 10 — integrations foundation
+
+**Purpose.** Before wiring any real provider OAuth, Hula needs a clean, provider-
+agnostic foundation so future integrations (Google Calendar, Gmail, Zoom, Notion,
+Asana, Slack, aggregators like Nylas) plug in without one-off code. Section 10
+adds that foundation: a provider registry, database models, a server-only
+encrypted token vault, read-only status endpoints, a disconnect, an action-risk
+policy, and full offline test coverage. **No real provider is connected**, no
+provider data is synced, and no action is executed.
+
+### Provider registry
+
+`src/integrations/catalog.ts` is the single source of truth for known providers
+and their metadata — display name, category, auth type, least-privilege default
+scopes, capabilities, and a note. It is metadata only: no OAuth URLs, no network,
+no tokens. Providers: `google_calendar`, `gmail`, `zoom`, `notion`, `asana`,
+`slack`, `nylas`, and an internal `generic` stub (hidden from user-facing status).
+
+### Connection model
+
+- **`IntegrationConnection`** — one row per (user, provider): status
+  (`disconnected | connected | expired | revoked | error`), granted/requested
+  scopes, capabilities, and timestamps. The source of truth for whether Hula may
+  later read from a provider.
+- **`IntegrationCredential`** — server-only encrypted token store (1:1 with a
+  connection). The mobile app can never read it.
+- **`IntegrationSyncState`** — reserved per-resource sync cursors (unused yet).
+- **`IntegrationEvent` / `IntegrationActionLog`** — redacted, audit-style rows
+  that survive a disconnect. Only sanitised summaries are stored — never raw
+  provider payloads or tokens.
+
+### Token vault
+
+`src/integrations/tokenVault.ts` encrypts tokens with **AES-256-GCM** using
+`INTEGRATION_TOKEN_ENCRYPTION_KEY` (a 32-byte key, base64 or hex). The key is
+read lazily, so the server still boots without it — it is only required the
+moment a token is actually encrypted/decrypted. Ciphertext is versioned
+(`v1:<iv>:<authTag>:<ciphertext>`), each encryption uses a fresh random IV, and
+authentication means a wrong key or tampered data fails to decrypt. Token values
+are never logged, thrown, or returned to the app.
+
+### Status + disconnect endpoints
+
+All require a Clerk bearer token and are scoped to the signed-in user. No tokens,
+scopes-as-secrets, or raw payloads are ever exposed.
+
+```bash
+# Provider catalog (static metadata)
+GET  /v1/me/integrations/catalog
+
+# The signed-in user's statuses (merged catalog + their connections)
+GET  /v1/me/integrations
+
+# One provider's status (unknown provider → 404)
+GET  /v1/me/integrations/:provider
+
+# Not implemented yet — returns 501 { "status": "not_implemented" }
+POST /v1/me/integrations/:provider/connect
+
+# Mark a provider disconnected (idempotent); clears credentials, keeps audit logs
+POST /v1/me/integrations/:provider/disconnect
+```
+
+### Future OAuth flow (planned, not built)
+
+Real connects will use **Authorization Code + PKCE** via the system/external
+browser (native mobile OAuth), request **least-privilege scopes**, and track the
+**exact granted scopes**. Tokens will be stored **only server-side**, encrypted
+via the vault; access tokens stay short-lived and refresh tokens are protected.
+The design supports both direct provider APIs and aggregators (e.g. Nylas), and
+**incremental permissions** — users enable only what they want Hula to access.
+
+### Future Google Calendar plan
+
+Google Calendar is the first planned provider: read-only events first
+(`calendar.events.readonly`), then free/busy, then event creation gated behind
+the action policy. It will reuse the same connection/credential/sync models and
+the `future_calendar` reminder source added in Section 9.
+
+### Future action policy
+
+`src/integrations/policy.ts` defines action risk levels — `read`, `draft`,
+`write`, `send`, `purchase`, `destructive` — and a pure gate: reads/drafts need
+the provider connected **and** the scope granted; writes/sends additionally need
+**explicit user confirmation**; purchases and destructive actions are **not
+allowed yet**. Nothing executes actions — this is the single gate real actions
+will pass through later.
+
+### Security model
+
+- Provider tokens live **only** server-side, encrypted at rest; the app never
+  sees them.
+- Every endpoint requires Clerk auth and returns only the caller's own records.
+- Unknown providers are rejected (`404`).
+- Only redacted summaries are persisted for events/actions — never raw payloads.
+- Hula stays **honest**: connected app names may be surfaced to the brain, but
+  the prompt still forbids claiming it accessed data or performed an action.
+
+### Verify it
+
+```bash
+# Offline unit tests (registry, AES-256-GCM vault roundtrip + refusal + tamper,
+# scope hashing, action policy, honest brain context).
+npm test                     # includes scripts/integrations.test.ts
+
+# DB-backed end-to-end helper check (skips without DATABASE_URL; uses a FAKE
+# token; proves no helper returns token values; cleans up).
+npm run test:integrations
+
+# While signed in, read your own catalog + statuses:
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/integrations/catalog \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/integrations \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+```
+
+> Apply the additive migration first: `npm run prisma:migrate`
+> (creates the `integration_*` tables; touches no existing data).
+
+**Limitations (by design):** no real OAuth yet, no provider data sync, no
+tool/action execution, and no frontend integrations UI. `connect` is a `501`
+stub.
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -796,11 +919,12 @@ UI; and no Anthropic call for due-reminder delivery.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders + integrations tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run test:memory`      | DB-backed memory check (skips w/o DB URL; cleans up).|
 | `npm run test:reminders`   | DB-backed reminder worker check (skips w/o DB URL; stubs sender; cleans up).|
+| `npm run test:integrations`| DB-backed integration foundation check (skips w/o DB URL; fake token; cleans up).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -850,7 +974,12 @@ src/
     parse.ts            #   pure date/time + timezone parsing (Intl, no deps)
     reminders.ts        #   command classify, title/phrasing, DB helpers, orchestrator
     worker.ts           #   conservative delivery worker (deterministic text)
-  integrations/         # Integration types + registry (empty)
+  integrations/         # integrations foundation (Section 10)
+    catalog.ts          #   provider registry (metadata only, no OAuth/tokens)
+    tokenVault.ts       #   AES-256-GCM server-only token encrypt/decrypt
+    connections.ts      #   DB-backed connection status/upsert/disconnect + audit
+    policy.ts           #   action-risk policy gate (no execution yet)
+    types.ts / registry.ts # legacy Section 1 agent-tool placeholders
   actions/              # ActionApproval placeholders
   billing/              # Subscription placeholders
   legal/                # LegalConsent placeholders
@@ -877,6 +1006,9 @@ prisma/
   Calendar/Zoom/Gmail/Notion sources are reserved (`future_*`) but not built
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
-- Integrations, billing, WhatsApp, chat-history/frontend/reminders UI
+- Real integration OAuth / provider data sync / action execution — Section 10 adds
+  the **foundation** (registry, models, encrypted token vault, status endpoints,
+  action policy), but `connect` is a `501` stub and nothing talks to a provider
+- Billing, WhatsApp, chat-history/frontend/reminders/integrations UI
 
 These arrive in later sections.

@@ -11,6 +11,11 @@ import {
   parseMessageOrder,
 } from "../db/queries";
 import { getMessagingStatus } from "../users/messagingIdentity";
+import { isKnownProvider, listIntegrationCatalog } from "../integrations/catalog";
+import {
+  disconnectIntegrationConnection,
+  getUserIntegrationStatus,
+} from "../integrations/connections";
 import {
   listActiveMemoriesForUser,
   softDeleteMemory,
@@ -227,6 +232,112 @@ meRouter.delete("/v1/me/reminders/:id", requireClerkAuth, async (req, res) => {
     res.status(500).json({ error: "reminder_delete_failed" });
   }
 });
+
+// --- Section 10: integrations foundation ---------------------------------
+//
+// Read-only status + a disconnect. There is intentionally NO working connect
+// flow yet: `connect` returns 501 { status: "not_implemented" }. No tokens,
+// scopes-as-secrets, or raw provider payloads are ever exposed; a user only
+// ever sees their OWN integration records.
+
+// NOTE: `/catalog` MUST be registered before `/:provider` so it isn't captured
+// as a provider slug.
+meRouter.get("/v1/me/integrations/catalog", requireClerkAuth, (_req, res) => {
+  // Static, non-sensitive provider metadata (no user data, no secrets).
+  res.status(200).json({ providers: listIntegrationCatalog() });
+});
+
+meRouter.get("/v1/me/integrations", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const integrations = await getUserIntegrationStatus(user.id);
+    const connectedCount = integrations.filter((i) => i.connected).length;
+    // Safe log: counts only, never provider account details or the user id.
+    logger.info("me.integrations served", {
+      count: integrations.length,
+      connected: connectedCount,
+    });
+    res.status(200).json({ integrations });
+  } catch (err) {
+    logger.error("me.integrations failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "integrations_query_failed" });
+  }
+});
+
+meRouter.get("/v1/me/integrations/:provider", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+  const provider = req.params.provider ?? "";
+
+  if (!isKnownProvider(provider)) {
+    res.status(404).json({ error: "unknown_provider" });
+    return;
+  }
+
+  try {
+    const user = await getOrCreateUserByClerkId(clerkUserId);
+    const all = await getUserIntegrationStatus(user.id);
+    const integration = all.find((i) => i.provider === provider);
+    if (!integration) {
+      // Known provider but not user-facing (e.g. internal stub).
+      res.status(404).json({ error: "unknown_provider" });
+      return;
+    }
+    logger.info("me.integration status served", { connected: integration.connected });
+    res.status(200).json({ integration });
+  } catch (err) {
+    logger.error("me.integration status failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "integration_query_failed" });
+  }
+});
+
+meRouter.post(
+  "/v1/me/integrations/:provider/connect",
+  requireClerkAuth,
+  (req, res) => {
+    const provider = req.params.provider ?? "";
+    if (!isKnownProvider(provider)) {
+      res.status(404).json({ error: "unknown_provider" });
+      return;
+    }
+    // Real OAuth (Authorization Code + PKCE via the system browser) arrives in a
+    // later section. Nothing is connected and no token is issued here.
+    logger.info("me.integration connect not implemented", { provider });
+    res.status(501).json({ status: "not_implemented" });
+  },
+);
+
+meRouter.post(
+  "/v1/me/integrations/:provider/disconnect",
+  requireClerkAuth,
+  async (req, res) => {
+    const clerkUserId = req.clerkUserId as string;
+    const provider = req.params.provider ?? "";
+
+    if (!isKnownProvider(provider)) {
+      res.status(404).json({ error: "unknown_provider" });
+      return;
+    }
+
+    try {
+      const user = await getOrCreateUserByClerkId(clerkUserId);
+      const changed = await disconnectIntegrationConnection(user.id, provider);
+      logger.info("me.integration disconnected", { provider, changed });
+      // Idempotent: disconnecting an already-disconnected provider is a success.
+      res.status(200).json({ ok: true, changed });
+    } catch (err) {
+      logger.error("me.integration disconnect failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+      res.status(500).json({ error: "integration_disconnect_failed" });
+    }
+  },
+);
 
 meRouter.get("/v1/me/conversations", requireClerkAuth, async (req, res) => {
   const clerkUserId = req.clerkUserId as string;

@@ -21,6 +21,7 @@ import { listRecentBrainMessages } from "../db/queries";
 import { resolveInboundLink } from "../users/linking";
 import { loadBrainContextForUser } from "../users/profile";
 import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
+import { listConnectedProviderNames } from "../integrations/connections";
 import { handleReminderCommand } from "../reminders/reminders";
 import type { HulaPromptContext } from "../ai/prompts";
 import { logger } from "../utils/logger";
@@ -143,6 +144,20 @@ async function generateBrainReply(
     // lightly. `buildMemoryContext` is best-effort and never throws.
     const memories = await buildMemoryContext(userId);
     if (memories.length > 0) context = { ...context, memories };
+
+    // Connected integrations (Section 10) — display names only, never tokens or
+    // scopes. Today this is always empty (no real connect flow yet); it keeps
+    // Hula honest without letting it claim it can act on any app.
+    try {
+      const connectedProviders = await listConnectedProviderNames(userId);
+      if (connectedProviders.length > 0) {
+        context = { ...context, connectedProviders };
+      }
+    } catch (err) {
+      logger.error("sendblue.webhook integration status load failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+    }
   }
 
   const { reply, usedFallback } = await generateHulaReply({ history, context });
