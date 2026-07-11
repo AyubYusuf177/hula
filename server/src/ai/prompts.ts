@@ -36,21 +36,96 @@ export interface HulaPromptContext {
   firstName?: string;
   /** A short tone hint (e.g. from onboarding), if known. */
   tone?: string;
+  /** Areas the user most wants help with (from onboarding), if known. */
+  helpMost?: string[];
+  /** The user's birthday (ISO `YYYY-MM-DD`), used only to derive an approx age. */
+  birthday?: string;
+  /** The user's sex, if known. Used sparingly. */
+  sex?: string;
+  /** IANA timezone, if known (e.g. "Europe/London"). */
+  timezone?: string;
+  /** BCP-47 locale, if known (e.g. "en-GB"). */
+  locale?: string;
+  /** Country, if known. */
+  country?: string;
   /** The channel the message arrived on (e.g. "imessage"). */
   channel?: string;
 }
 
 /**
+ * Map a tone preference to a one-line style instruction. Unknown tones return
+ * undefined so nothing is appended. Pure and DB-free.
+ */
+export function toneGuidance(tone: string | undefined): string | undefined {
+  switch (tone) {
+    case "concise":
+      return "Match their preferred tone: direct, efficient, and minimal. Skip filler.";
+    case "witty":
+      return "Match their preferred tone: sharper and with a little personality, while staying genuinely useful.";
+    case "strategic":
+      return "Match their preferred tone: structured, high-agency, and planning-oriented.";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Derive an approximate age in whole years from an ISO `YYYY-MM-DD` birthday.
+ * Returns undefined for anything unparseable or out of a sane range. Pure.
+ */
+export function deriveAge(birthday: string | undefined, now: Date = new Date()): number | undefined {
+  if (!birthday) return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(birthday.trim());
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!year || !month || !day) return undefined;
+  let age = now.getFullYear() - year;
+  const beforeBirthday =
+    now.getMonth() + 1 < month || (now.getMonth() + 1 === month && now.getDate() < day);
+  if (beforeBirthday) age -= 1;
+  return age >= 0 && age < 120 ? age : undefined;
+}
+
+/**
  * Build the full system prompt, optionally appending a compact context block.
  * The context is limited to lightweight, non-sensitive hints and never includes
- * any backend/vendor detail.
+ * any backend/vendor detail. Profile facts are used LIGHTLY — the prompt tells
+ * the model to personalise naturally without ever announcing what it knows.
  */
 export function buildHulaSystemPrompt(context?: HulaPromptContext): string {
+  if (!context) return HULA_SYSTEM_PROMPT;
+
   const lines: string[] = [];
-  if (context?.firstName) lines.push(`The user's first name is ${context.firstName}.`);
-  if (context?.tone) lines.push(`Preferred tone: ${context.tone}.`);
-  if (context?.channel) lines.push(`This conversation is over ${context.channel}.`);
+  if (context.firstName) lines.push(`The user's first name is ${context.firstName}.`);
+
+  const tone = toneGuidance(context.tone);
+  if (tone) lines.push(tone);
+
+  if (context.helpMost && context.helpMost.length > 0) {
+    lines.push(
+      `They mainly want help with: ${context.helpMost.join(", ")}. Bias useful suggestions toward these when relevant.`,
+    );
+  }
+
+  const age = deriveAge(context.birthday);
+  if (age !== undefined) lines.push(`They are around ${age} years old.`);
+
+  if (context.sex) lines.push(`Sex: ${context.sex}.`);
+
+  const place: string[] = [];
+  if (context.timezone) place.push(`timezone ${context.timezone}`);
+  if (context.locale) place.push(`locale ${context.locale}`);
+  if (context.country) place.push(`country ${context.country}`);
+  if (place.length > 0) lines.push(`Regional context: ${place.join(", ")}.`);
+
+  if (context.channel) lines.push(`This conversation is over ${context.channel}.`);
 
   if (lines.length === 0) return HULA_SYSTEM_PROMPT;
-  return `${HULA_SYSTEM_PROMPT}\n\nContext for this user:\n${lines.join("\n")}`;
+
+  return `${HULA_SYSTEM_PROMPT}
+
+Context for this user (use it lightly and naturally — personalise, but never announce what you know about them or mention onboarding/profiles):
+${lines.join("\n")}`;
 }

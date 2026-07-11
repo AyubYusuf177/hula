@@ -67,6 +67,9 @@ model UserProfile {
   timezone    String?
   locale      String?
   country     String?
+  /// Additive JSON bag for a few extra safe onboarding fields that don't need
+  /// their own columns yet (Section 7): { helpMost?: string[]; discoverySource?: string }.
+  preferencesJson Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

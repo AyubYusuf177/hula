@@ -383,6 +383,90 @@ made. `npm run test:brain` is a **manual** script that calls the real brain with
 small fake history (uses `ANTHROPIC_API_KEY` if present, else the fallback path)
 and prints only the reply text.
 
+## Section 7 — silent profile / onboarding context sync
+
+The app already collects a little onboarding/profile data (name, tone, what the
+user wants help with, etc.) and keeps it locally. Section 7 quietly mirrors a
+**small set of safe fields** to the backend so the Hula brain can be a bit more
+personal in iMessage — with **zero** new user-facing UI, popups, buttons,
+permissions, or loading states.
+
+### What gets synced
+
+The app builds a payload from local onboarding answers + the display-name
+override + the device, and the backend accepts **only** these fields (everything
+else is dropped):
+
+`displayName`, `firstName`, `birthday`, `sex`, `tone`
+(`concise|witty|strategic`), `helpMost[]`, `discoverySource`, `timezone`,
+`locale`, `country`.
+
+Every field is trimmed, length-capped, and validated server-side
+(`sanitizeProfileInput`); `helpMost` is capped to 12 short items. Unknown keys,
+tokens, secrets, message content, and ids are never accepted or stored. Nothing
+sensitive leaves the device.
+
+### How the sync happens (silent + best-effort)
+
+- On Home load, `hooks/useSyncHulaProfile` reads local data, builds the payload
+  (`lib/hulaProfileSync.ts` → `buildProfileSyncPayload`), gets a Clerk token
+  silently, and `PUT`s it.
+- An in-memory per-user guard remembers the last synced payload, so re-renders
+  and Home re-focuses don't spam the backend — a request only fires when the
+  data actually changes.
+- Any failure is a no-op (dev-only warning). It never blocks Home or "Text hula".
+
+### New endpoints (Clerk-guarded)
+
+Both require a valid Clerk bearer token and only ever touch the caller's own
+profile (resolved from the token `sub`), exactly like `/v1/me/messages`.
+
+```bash
+# Read your own profile (empty until the first sync)
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/profile \
+  -H "Authorization: Bearer $CLERK_TOKEN"
+# { "profile": { "updatedAt": null } }
+
+# Sync safe fields (idempotent upsert; partial updates never blank other fields)
+curl -s -X PUT https://YOUR-NGROK.ngrok-free.app/v1/me/profile \
+  -H "Authorization: Bearer $CLERK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"firstName":"Ayub","tone":"strategic","helpMost":["travel","emails"],"timezone":"Europe/London"}'
+# { "profile": { "firstName": "Ayub", "tone": "strategic", ... } }
+```
+
+Storage reuses the existing `UserProfile` table. The only schema change is one
+additive nullable column, `preferencesJson` (JSONB), holding `helpMost` +
+`discoverySource` — no data reset, no destructive migration.
+
+### How the brain uses it
+
+For a normal message from an already-linked user, the webhook loads the user's
+`UserProfile` (`loadBrainContextForUser`) alongside recent history and passes a
+**safe** context into the system prompt. The prompt uses it *lightly*: addresses
+the user by first name when natural, maps `tone` to a style
+(concise → direct/minimal, witty → sharper personality, strategic →
+structured/planning), biases suggestions toward `helpMost`, and adds
+timezone/locale/country + an approximate age. It is explicitly told **not** to
+announce what it knows or mention onboarding/profiles, and no vendor/internal
+detail is ever exposed (asserted by `scripts/profile.test.ts`). A missing
+profile simply means less personalisation — it never breaks a reply.
+
+### Verify it
+
+```bash
+# Offline unit tests (sanitisation, context derivation, tone mapping, prompt safety)
+npm test        # includes scripts/profile.test.ts
+
+# In the app: open Home while signed in — no new UI appears. Confirm the sync with:
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/profile -H "Authorization: Bearer $CLERK_TOKEN"
+
+# Then text Hula from a linked thread, e.g.:
+#   "What do you know about how I want you to help me?"
+#   "Plan my next 3 hours in my preferred style."
+# Hula answers using your tone/helpMost — without mentioning internals or onboarding.
+```
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -390,7 +474,7 @@ and prints only the reply text.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
@@ -412,7 +496,7 @@ src/
 
   routes/webhooks.ts    # POST /webhooks/sendblue (inbound + code linking)
   routes/linkSessions.ts# POST /v1/link-sessions (Section 3, Clerk-guarded)
-  routes/me.ts          # GET /v1/me/messages + /v1/me/conversations (Section 5)
+  routes/me.ts          # GET /v1/me/messages + /conversations (S5) + /v1/me/profile GET/PUT (S7)
   auth/clerk.ts         # Clerk token verification + requireClerkAuth middleware
 
   channels/             # channel-agnostic messaging core
@@ -428,6 +512,7 @@ src/
     linkSessions.ts     #   one-time connect codes (DB-backed create/get/consume)
     messagingIdentity.ts#   sender handle -> Hula user (DB-backed)
     linking.ts          #   pure decideLinkOutcome + DB-backed resolveInboundLink
+    profile.ts          #   safe profile sanitise/upsert/query + brain context (Section 7)
   conversations/        # Conversation + Message types
   ai/                   # the Hula brain (Section 6)
     anthropicClient.ts  #   minimal Anthropic Messages API client (fetch, no SDK)
@@ -455,7 +540,8 @@ prisma/
 
 - Tool/action execution — the brain can think, plan, and draft, but cannot yet
   run integrations, send emails, book things, or set real reminders
-- Onboarding profile sync into the brain and long-term memory summaries
+- Long-term memory summaries (Section 7 adds lightweight profile context to the
+  brain, but no rolling memory/summarisation yet)
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
 - Integrations, billing, WhatsApp, reminders, chat-history/frontend UI

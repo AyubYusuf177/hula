@@ -6,6 +6,8 @@
  * per-request Clerk session token is passed in by the caller.
  */
 
+import type { ProfileSyncPayload } from './hulaProfileSync';
+
 /** Backend base URL, e.g. an ngrok tunnel during local development. */
 const BASE_URL = process.env.EXPO_PUBLIC_HULA_API_URL;
 
@@ -103,4 +105,39 @@ export async function fetchMyMessages(
   }
 
   return (await res.json()) as MyMessagesResponse;
+}
+
+/** The safe profile the backend stores/returns (all fields optional). */
+export interface MyProfile extends ProfileSyncPayload {
+  /** ISO timestamp of the last update, or null when no profile exists yet. */
+  updatedAt: string | null;
+}
+
+/**
+ * Silently mirror the signed-in user's safe profile fields to the backend
+ * (`PUT /v1/me/profile`). `token` is a Clerk session token from `getToken()`.
+ * Best-effort by design: the caller treats any rejection as a no-op. Returns the
+ * stored profile so callers can confirm what was persisted.
+ */
+export async function syncMyProfile(
+  token: string,
+  payload: ProfileSyncPayload,
+): Promise<MyProfile> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(`${BASE_URL}/v1/me/profile`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    throw new Error(`me/profile sync failed (${res.status})`);
+  }
+
+  const data = (await res.json()) as { profile: MyProfile };
+  return data.profile;
 }

@@ -19,6 +19,8 @@ import { env } from "../config/env";
 import { recordInbound, recordOutbound } from "../db/persist";
 import { listRecentBrainMessages } from "../db/queries";
 import { resolveInboundLink } from "../users/linking";
+import { loadBrainContextForUser } from "../users/profile";
+import type { HulaPromptContext } from "../ai/prompts";
 import { logger } from "../utils/logger";
 
 /**
@@ -102,6 +104,7 @@ function logInboundSummary(message: InboundMessage): void {
 async function generateBrainReply(
   message: InboundMessage,
   conversationId: string | null,
+  userId: string | null,
 ): Promise<{ reply: string; usedFallback: boolean; historyCount: number }> {
   let history: BrainMessage[] = [];
   if (conversationId) {
@@ -120,10 +123,22 @@ async function generateBrainReply(
     history = [{ role: "user", text: message.content.text }];
   }
 
-  const { reply, usedFallback } = await generateHulaReply({
-    history,
-    context: { channel: message.channel },
-  });
+  // Load the user's safe profile context (best-effort). A missing profile or a
+  // load failure just means the brain personalises less — it never blocks the
+  // reply.
+  let context: HulaPromptContext = { channel: message.channel };
+  if (userId) {
+    try {
+      const profileContext = await loadBrainContextForUser(userId);
+      context = { ...profileContext, channel: message.channel };
+    } catch (err) {
+      logger.error("sendblue.webhook brain profile load failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+    }
+  }
+
+  const { reply, usedFallback } = await generateHulaReply({ history, context });
   return { reply, usedFallback, historyCount: history.length };
 }
 
@@ -179,7 +194,11 @@ async function processInbound(message: InboundMessage): Promise<void> {
   // sender flows keep their deterministic linking reply (no brain call).
   let replyText = outcome.reply;
   if (outcome.brainEligible) {
-    const brain = await generateBrainReply(message, conversationId);
+    const brain = await generateBrainReply(
+      message,
+      conversationId,
+      outcome.userId ?? null,
+    );
     replyText = brain.reply;
     logger.info("sendblue.webhook brain reply", {
       sender: maskHandle(to),

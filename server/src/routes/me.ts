@@ -9,6 +9,11 @@ import {
   listRecentMessagesForUser,
   parseMessageOrder,
 } from "../db/queries";
+import {
+  getUserProfile,
+  sanitizeProfileInput,
+  upsertUserProfile,
+} from "../users/profile";
 import { logger } from "../utils/logger";
 
 /**
@@ -60,6 +65,41 @@ meRouter.get("/v1/me/messages", requireClerkAuth, async (req, res) => {
       reason: err instanceof Error ? err.message : "unknown error",
     });
     res.status(500).json({ error: "messages_query_failed" });
+  }
+});
+
+meRouter.get("/v1/me/profile", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const profile = await getUserProfile(clerkUserId);
+    // Safe log: which fields exist, never their values.
+    logger.info("me.profile served", { hasProfile: profile.updatedAt !== null });
+    res.status(200).json({ profile });
+  } catch (err) {
+    logger.error("me.profile get failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "profile_query_failed" });
+  }
+});
+
+meRouter.put("/v1/me/profile", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  // Never trust the client body: keep only known, capped, validated fields.
+  const input = sanitizeProfileInput(req.body);
+
+  try {
+    const profile = await upsertUserProfile(clerkUserId, input);
+    // Safe log: count of accepted fields only, never their values.
+    logger.info("me.profile synced", { fieldCount: Object.keys(input).length });
+    res.status(200).json({ profile });
+  } catch (err) {
+    logger.error("me.profile put failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "profile_update_failed" });
   }
 });
 
