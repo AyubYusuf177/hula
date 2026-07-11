@@ -8,7 +8,7 @@ import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { hula } from '@/constants/theme';
-import { createLinkSession, MissingApiUrlError } from '@/lib/hulaApi';
+import { createLinkSession, fetchMessagingStatus, MissingApiUrlError } from '@/lib/hulaApi';
 import {
   clearOnboardingComplete,
   clearOnboardingStage,
@@ -75,9 +75,11 @@ export default function Home() {
     router.replace('/');
   };
 
-  // "Text hula": ask the backend for a one-time connect code, then open Messages
-  // to the Hula line with the prefilled connect text. The user only presses send
-  // — they never type the code themselves.
+  // "Text hula": if the user is already connected, just open the existing
+  // Messages thread to Hula — no new code, no prefilled text. If they are not
+  // connected yet, ask the backend for a one-time connect code and open Messages
+  // with the prefilled connect text (the user only presses send). If the status
+  // check fails for any reason, fall back to the safe connect-code flow.
   const onTextHula = async () => {
     if (texting) return;
     setTexting(true);
@@ -86,11 +88,39 @@ export default function Home() {
       if (!token) throw new Error('Not signed in');
 
       const firstName = resolveFirstName(user, profile.displayName);
-      const { hulaNumber, messageBody } = await createLinkSession(token, { firstName });
+
+      // Best-effort connection check. A failure here must never block the user —
+      // we simply fall through to the connect-code flow below.
+      let alreadyConnected = false;
+      let connectedNumber: string | undefined;
+      try {
+        const status = await fetchMessagingStatus(token);
+        alreadyConnected = status.imessage.connected;
+        connectedNumber = status.hulaNumber;
+      } catch (statusErr) {
+        if (__DEV__) {
+          console.warn('[Text hula] status check failed, using connect flow:', statusErr);
+        }
+      }
+
+      let hulaNumber: string;
+      let messageBody: string | undefined;
+      if (alreadyConnected && connectedNumber) {
+        // Connected: open the existing thread only — no new session, no code.
+        hulaNumber = connectedNumber;
+        messageBody = undefined;
+      } else {
+        // Not connected (or status unknown): one-time connect code + prefill.
+        const session = await createLinkSession(token, { firstName });
+        hulaNumber = session.hulaNumber;
+        messageBody = session.messageBody;
+      }
 
       // iOS uses `&` between the number and query; Android uses `?`.
       const separator = Platform.OS === 'ios' ? '&' : '?';
-      const url = `sms:${hulaNumber}${separator}body=${encodeURIComponent(messageBody)}`;
+      const url = messageBody
+        ? `sms:${hulaNumber}${separator}body=${encodeURIComponent(messageBody)}`
+        : `sms:${hulaNumber}`;
 
       const canOpen = await Linking.canOpenURL(url);
       if (!canOpen) throw new Error('Messages is not available on this device');

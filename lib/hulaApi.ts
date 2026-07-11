@@ -59,6 +59,45 @@ export async function createLinkSession(
   return (await res.json()) as LinkSessionResponse;
 }
 
+/** The masked iMessage connection status from `GET /v1/me/messaging-status`. */
+export interface ImessageStatus {
+  connected: boolean;
+  provider: string;
+  linkedAt: string | null;
+  /** Masked handle (e.g. "+*******0761"), or null when not connected. */
+  handleDisplay: string | null;
+}
+
+/** Response shape of `GET /v1/me/messaging-status`. */
+export interface MessagingStatusResponse {
+  imessage: ImessageStatus;
+  /** Hula's own line, so a connected user can open the existing thread. */
+  hulaNumber: string;
+}
+
+/**
+ * Fetch whether the signed-in user is already connected to a Hula messaging
+ * sender. `token` is a Clerk session token from `getToken()`. Used by "Text
+ * hula" to decide between opening the existing thread and starting the one-time
+ * connect flow. The backend scopes the result to the authenticated user and
+ * masks the handle.
+ */
+export async function fetchMessagingStatus(
+  token: string,
+): Promise<MessagingStatusResponse> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(`${BASE_URL}/v1/me/messaging-status`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`me/messaging-status request failed (${res.status})`);
+  }
+
+  return (await res.json()) as MessagingStatusResponse;
+}
+
 /** A single stored message as returned by `GET /v1/me/messages`. */
 export interface MyMessage {
   id: string;

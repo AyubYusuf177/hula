@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { requireClerkAuth } from "../auth/clerk";
+import { env } from "../config/env";
 import {
   DEFAULT_MESSAGE_LIMIT,
   MAX_MESSAGE_LIMIT,
@@ -9,12 +10,16 @@ import {
   listRecentMessagesForUser,
   parseMessageOrder,
 } from "../db/queries";
+import { getMessagingStatus } from "../users/messagingIdentity";
 import {
   getUserProfile,
   sanitizeProfileInput,
   upsertUserProfile,
 } from "../users/profile";
 import { logger } from "../utils/logger";
+
+/** Fallback Hula line if the env value isn't configured (matches Section 3). */
+const DEFAULT_HULA_NUMBER = "+16465480761";
 
 /**
  * Authenticated inspection routes (Section 5).
@@ -100,6 +105,27 @@ meRouter.put("/v1/me/profile", requireClerkAuth, async (req, res) => {
       reason: err instanceof Error ? err.message : "unknown error",
     });
     res.status(500).json({ error: "profile_update_failed" });
+  }
+});
+
+meRouter.get("/v1/me/messaging-status", requireClerkAuth, async (req, res) => {
+  const clerkUserId = req.clerkUserId as string;
+
+  try {
+    const imessage = await getMessagingStatus(clerkUserId);
+    // Hula's own line is public (not a secret); the app needs it to open the
+    // existing thread when the user is already connected.
+    const hulaNumber = env.SENDBLUE_HULA_NUMBER ?? DEFAULT_HULA_NUMBER;
+
+    // Safe log: connection flag only, never the handle or user id.
+    logger.info("me.messaging-status served", { connected: imessage.connected });
+
+    res.status(200).json({ imessage, hulaNumber });
+  } catch (err) {
+    logger.error("me.messaging-status failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    res.status(500).json({ error: "messaging_status_query_failed" });
   }
 });
 

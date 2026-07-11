@@ -467,6 +467,70 @@ curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/profile -H "Authorization: Beare
 # Hula answers using your tone/helpMost — without mentioning internals or onboarding.
 ```
 
+## Section 7.1 — connected-aware "Text hula"
+
+Previously, tapping **Text hula** always created a new one-time link session and
+opened Messages with a prefilled `HULA-XXXX` connect code — even for users who
+were already connected. Section 7.1 makes the button connection-aware:
+
+- Before deciding, the app calls a new endpoint to check whether the signed-in
+  user is already connected to a messaging sender.
+- **If connected:** it opens the Hula thread with **no prefilled text** and does
+  **not** generate a new code (no link session is created).
+- **If not connected:** it keeps the existing flow — a fresh one-time link code
+  and a prefilled connect message.
+- One-time codes stay **temporary and random** (unchanged) — they are never made
+  constant per account. The old bug was only that new codes kept being generated
+  after the user was already linked.
+- If the status check fails for any reason, the app safely falls back to the
+  connect-code flow and logs a dev-only warning. No new UI or user action added.
+
+### New endpoint (Clerk-guarded, read-only)
+
+**`GET /v1/me/messaging-status`** — the signed-in user's masked connection
+status. Resolved from the token `sub`, scoped to that user only. Never exposes
+the full handle, other users' identities, or secrets.
+
+```jsonc
+// 200 OK — connected
+{
+  "imessage": {
+    "connected": true,
+    "provider": "sendblue",
+    "linkedAt": "2026-07-11T12:00:00.000Z",
+    "handleDisplay": "+*******0761"   // masked: only the last 4 digits
+  },
+  "hulaNumber": "+16465480761"        // public Hula line, used to open the thread
+}
+
+// 200 OK — not connected
+{
+  "imessage": {
+    "connected": false,
+    "provider": "sendblue",
+    "linkedAt": null,
+    "handleDisplay": null
+  },
+  "hulaNumber": "+16465480761"
+}
+```
+
+### Verify it
+
+```bash
+# Offline unit test for the handle masking:
+npm test        # includes scripts/messagingStatus.test.ts
+
+# While signed in, check your own status (masked handle only):
+curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/messaging-status \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+
+# In the app, with the current sender already connected, tap "Text hula":
+#   - Messages opens to Hula with NO prefilled connect-code text.
+#   - No new HULA-XXXX code is generated.
+# From a fresh/unconnected account, tapping "Text hula" still prefills a new code.
+```
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -474,7 +538,7 @@ curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/profile -H "Authorization: Beare
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain + profile tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |

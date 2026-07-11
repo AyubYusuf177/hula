@@ -1,6 +1,7 @@
 import { digitsOf } from "../channels/sendblue/normalize";
 import type { Channel, Provider } from "../channels/types";
 import { getPrisma } from "../db/prisma";
+import { getOrCreateUserByClerkId } from "./store";
 
 /**
  * A messaging identity ties a provider-specific sender handle (phone number or
@@ -103,4 +104,91 @@ export async function linkIdentity(params: {
     channel: params.channel,
     linkedAt: identity.linkedAt,
   };
+}
+
+/** Provider assumed for the messaging status when nothing is linked yet. */
+const DEFAULT_STATUS_PROVIDER: Provider = "sendblue";
+
+/**
+ * Pure: mask a sender handle for display so the app never receives the full
+ * phone number or email. Phones keep only their last four digits (e.g.
+ * "+16465480761" → "+*******0761"); emails keep only the first character of the
+ * local part (e.g. "me@example.com" → "m***@example.com"). No I/O — unit-testable.
+ */
+export function maskHandle(handle: string): string {
+  const trimmed = handle.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("@")) {
+    const atIndex = trimmed.indexOf("@");
+    const local = trimmed.slice(0, atIndex);
+    const domain = trimmed.slice(atIndex + 1);
+    const head = local.slice(0, 1);
+    return `${head}***@${domain}`;
+  }
+  const digits = digitsOf(trimmed);
+  if (digits.length === 0) return "***";
+  const visible = digits.slice(-4);
+  const stars = "*".repeat(Math.max(0, digits.length - visible.length));
+  const prefix = trimmed.startsWith("+") ? "+" : "";
+  return `${prefix}${stars}${visible}`;
+}
+
+/**
+ * The safe, masked connection status the app reads to decide the "Text hula"
+ * behaviour. Never exposes the full handle, other users' identities, or secrets.
+ */
+export interface ImessageStatusView {
+  connected: boolean;
+  provider: string;
+  linkedAt: string | null;
+  /** Masked handle (e.g. "+*******0761"), or null when not connected. */
+  handleDisplay: string | null;
+}
+
+/**
+ * Read the connection status for an internal Hula user id. Returns the most
+ * recently linked ACTIVE identity (masked), or a not-connected view when none
+ * exists. Scoped to the given user only.
+ */
+export async function getImessageStatusForUser(
+  userId: string,
+): Promise<ImessageStatusView> {
+  const identity = await getPrisma().messagingIdentity.findFirst({
+    where: { userId, status: "active" },
+    orderBy: { linkedAt: "desc" },
+    select: {
+      provider: true,
+      handleDisplay: true,
+      handleNormalized: true,
+      linkedAt: true,
+    },
+  });
+
+  if (!identity) {
+    return {
+      connected: false,
+      provider: DEFAULT_STATUS_PROVIDER,
+      linkedAt: null,
+      handleDisplay: null,
+    };
+  }
+
+  const raw = identity.handleDisplay ?? identity.handleNormalized;
+  return {
+    connected: true,
+    provider: identity.provider || DEFAULT_STATUS_PROVIDER,
+    linkedAt: identity.linkedAt.toISOString(),
+    handleDisplay: raw ? maskHandle(raw) : null,
+  };
+}
+
+/**
+ * Resolve (or create) the Hula user for a Clerk id, then read their masked
+ * messaging status. Used by `GET /v1/me/messaging-status`.
+ */
+export async function getMessagingStatus(
+  clerkUserId: string,
+): Promise<ImessageStatusView> {
+  const user = await getOrCreateUserByClerkId(clerkUserId);
+  return getImessageStatusForUser(user.id);
 }
