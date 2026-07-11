@@ -139,6 +139,38 @@ export async function getConnectionForUserProvider(
  * list. The internal `generic` stub provider is excluded from user-facing status.
  * Every entry defaults to `disconnected` when the user has no row for it.
  */
+/**
+ * Merge one catalog entry with the user's connection (if any) into the SAFE,
+ * app-facing status item. Pure and side-effect free so it can be unit-tested:
+ * it intentionally reads ONLY non-secret fields off the connection view, so no
+ * token or credential material can ever reach this shape. See
+ * `scripts/integrations.test.ts`.
+ */
+export function toIntegrationStatusItem(
+  entry: {
+    provider: string;
+    displayName: string;
+    category: ProviderCategory;
+    status: ProviderStatus;
+    authType: ProviderAuthType;
+  },
+  conn: IntegrationConnectionView | undefined,
+): IntegrationStatusItem {
+  const status = conn?.status ?? "disconnected";
+  return {
+    provider: entry.provider,
+    displayName: entry.displayName,
+    category: entry.category,
+    catalogStatus: entry.status,
+    authType: entry.authType,
+    connectionStatus: status,
+    connected: status === "connected",
+    providerAccountEmail: conn?.providerAccountEmail ?? null,
+    connectedAt: conn?.connectedAt ?? null,
+    lastSyncedAt: conn?.lastSyncedAt ?? null,
+  };
+}
+
 export async function getUserIntegrationStatus(
   userId: string,
 ): Promise<IntegrationStatusItem[]> {
@@ -147,22 +179,7 @@ export async function getUserIntegrationStatus(
 
   return listIntegrationCatalog()
     .filter((entry) => entry.provider !== "generic")
-    .map((entry) => {
-      const conn = byProvider.get(entry.provider);
-      const status = conn?.status ?? "disconnected";
-      return {
-        provider: entry.provider,
-        displayName: entry.displayName,
-        category: entry.category,
-        catalogStatus: entry.status,
-        authType: entry.authType,
-        connectionStatus: status,
-        connected: status === "connected",
-        providerAccountEmail: conn?.providerAccountEmail ?? null,
-        connectedAt: conn?.connectedAt ?? null,
-        lastSyncedAt: conn?.lastSyncedAt ?? null,
-      };
-    });
+    .map((entry) => toIntegrationStatusItem(entry, byProvider.get(entry.provider)));
 }
 
 /** Connected provider DISPLAY names only — safe, for optional brain context. */

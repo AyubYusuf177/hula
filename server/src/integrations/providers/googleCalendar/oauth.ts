@@ -132,13 +132,21 @@ export interface GoogleTokenResponse {
   scopes: string[];
 }
 
-/** Minimal fetch signature so tests can inject a fake. */
+/**
+ * Minimal fetch signature so tests can inject a fake.
+ *
+ * `body` is OPTIONAL and MUST be omitted for GET/HEAD requests — Node's global
+ * `fetch` (undici) throws `TypeError: Request with GET/HEAD method cannot have
+ * body.` synchronously (before any network call) when a GET carries a body, even
+ * an empty string. `signal` lets callers apply a per-attempt abort timeout.
+ */
 export type FetchLike = (
   url: string,
   init: {
     method: string;
     headers: Record<string, string>;
-    body: string;
+    body?: string;
+    signal?: AbortSignal;
   },
 ) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
 

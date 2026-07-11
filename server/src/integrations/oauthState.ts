@@ -30,6 +30,8 @@ export interface ConsumedOAuthState {
   redirectUri: string;
   scopes: string[];
   codeVerifier: string | null;
+  /** Validated app deep-link to return to Hula, or null. Never trusted raw. */
+  appReturnUrl: string | null;
 }
 
 /** Generate an unguessable, URL-safe state token. */
@@ -52,6 +54,8 @@ export async function createOAuthState(input: {
   redirectUri: string;
   scopes: string[];
   codeVerifier: string | null;
+  /** Pre-validated app return URL (already passed `isSafeAppReturnUrl`) or null. */
+  appReturnUrl?: string | null;
 }): Promise<CreatedOAuthState> {
   const state = generateStateToken();
   const expiresAt = new Date(Date.now() + OAUTH_STATE_TTL_MS);
@@ -62,6 +66,7 @@ export async function createOAuthState(input: {
       state,
       codeVerifier: input.codeVerifier,
       redirectUri: input.redirectUri,
+      appReturnUrl: input.appReturnUrl ?? null,
       scopes: input.scopes,
       status: "pending",
       expiresAt,
@@ -108,5 +113,6 @@ export async function consumeOAuthState(
     redirectUri: row.redirectUri,
     scopes: toStringArray(row.scopes),
     codeVerifier: row.codeVerifier,
+    appReturnUrl: row.appReturnUrl ?? null,
   };
 }

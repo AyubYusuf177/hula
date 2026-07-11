@@ -86,6 +86,25 @@ export async function updateAccessToken(
 }
 
 /**
+ * Report whether a connection has stored token material, WITHOUT decrypting it.
+ * Only booleans are returned — safe for the diagnostic endpoint. Never touches the
+ * token vault, so it works even if the encryption key is unavailable.
+ */
+export async function hasCredentialSecrets(
+  connectionId: string,
+): Promise<{ credentialPresent: boolean; accessTokenPresent: boolean; refreshTokenPresent: boolean }> {
+  const row = await getPrisma().integrationCredential.findUnique({
+    where: { connectionId },
+    select: { encryptedAccessToken: true, encryptedRefreshToken: true },
+  });
+  return {
+    credentialPresent: Boolean(row),
+    accessTokenPresent: Boolean(row?.encryptedAccessToken),
+    refreshTokenPresent: Boolean(row?.encryptedRefreshToken),
+  };
+}
+
+/**
  * Read and decrypt a connection's stored tokens. Returns nulls when no
  * credential row exists. SERVER-ONLY — the result must never leave the backend.
  */

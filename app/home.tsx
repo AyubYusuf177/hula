@@ -21,11 +21,16 @@ import { useSyncHulaProfile } from '@/hooks/useSyncHulaProfile';
 
 const font = hula.typography.fontFamily;
 
-type MenuRow = { icon: keyof typeof Ionicons.glyphMap; label: string };
+type MenuRow = {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  /** Route to navigate to, or omitted for placeholder rows. */
+  route?: string;
+};
 
-/** The account/home menu rows (all placeholder / no-op for now). */
+/** The account/home menu rows. Only Integrations is wired up so far. */
 const MENU_ROWS: readonly MenuRow[] = [
-  { icon: 'link-outline', label: 'Integrations' },
+  { icon: 'link-outline', label: 'Integrations', route: '/integrations' },
   { icon: 'flash-outline', label: 'Actions' },
   { icon: 'ellipse-outline', label: 'Memory' },
   { icon: 'person-outline', label: 'Preferences' },
@@ -196,7 +201,9 @@ export default function Home() {
           {MENU_ROWS.map((row) => (
             <Pressable
               key={row.label}
-              onPress={() => {}}
+              onPress={() => {
+                if (row.route) router.push(row.route as never);
+              }}
               style={({ pressed }) => [styles.row, pressed && styles.pressed]}
             >
               <Ionicons name={row.icon} size={22} color={hula.glow.purpleBright} />

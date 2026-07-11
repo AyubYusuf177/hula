@@ -15,6 +15,7 @@
     "test:reminders": "tsx --env-file-if-exists=.env scripts/reminders.manual.ts",
     "test:integrations": "tsx --env-file-if-exists=.env scripts/integrations.manual.ts",
     "test:google-calendar": "tsx --env-file-if-exists=.env scripts/googleCalendar.manual.ts",
+    "test:google-calendar-real": "tsx --env-file-if-exists=.env scripts/googleCalendarRealDiagnostic.ts",
     "test:actions": "tsx --env-file-if-exists=.env scripts/actions.manual.ts",
     "start": "node --env-file-if-exists=.env dist/index.js",
     "prisma:generate": "prisma generate",

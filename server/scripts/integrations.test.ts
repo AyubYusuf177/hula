@@ -18,6 +18,10 @@ import {
   ACTION_RISK_LEVELS,
   evaluateActionPolicy,
 } from "../src/integrations/policy";
+import {
+  toIntegrationStatusItem,
+  type IntegrationConnectionView,
+} from "../src/integrations/connections";
 import { buildHulaSystemPrompt } from "../src/ai/prompts";
 
 /**
@@ -219,6 +223,96 @@ check("policy: purchases and destructive are never allowed yet", () => {
   assert.equal(evaluateActionPolicy({ risk: "purchase", ...base }).allowed, false);
   assert.equal(evaluateActionPolicy({ risk: "destructive", ...base }).allowed, false);
   assert.equal(evaluateActionPolicy({ risk: "purchase", ...base }).reason, "not_allowed_yet");
+});
+
+// --- Safe status mapping (Section 13) ------------------------------------
+
+const GCAL_ENTRY = {
+  provider: "google_calendar",
+  displayName: "Google Calendar",
+  category: "calendar" as const,
+  status: "available_readonly" as const,
+  authType: "oauth2" as const,
+};
+
+check("status: no connection maps to a disconnected item", () => {
+  const item = toIntegrationStatusItem(GCAL_ENTRY, undefined);
+  assert.equal(item.connectionStatus, "disconnected");
+  assert.equal(item.connected, false);
+  assert.equal(item.providerAccountEmail, null);
+  assert.equal(item.connectedAt, null);
+});
+
+check("status: a connected connection maps to connected=true", () => {
+  const conn: IntegrationConnectionView = {
+    provider: "google_calendar",
+    status: "connected",
+    displayName: "Google Calendar",
+    providerAccountEmail: "user@example.com",
+    grantedScopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+    capabilities: ["read_calendar_events"],
+    connectedAt: "2026-07-15T10:00:00.000Z",
+    disconnectedAt: null,
+    lastSyncedAt: "2026-07-15T10:05:00.000Z",
+    updatedAt: "2026-07-15T10:05:00.000Z",
+  };
+  const item = toIntegrationStatusItem(GCAL_ENTRY, conn);
+  assert.equal(item.connectionStatus, "connected");
+  assert.equal(item.connected, true);
+  assert.equal(item.providerAccountEmail, "user@example.com");
+  assert.equal(item.connectedAt, "2026-07-15T10:00:00.000Z");
+});
+
+check("status: expired/error/revoked never read as connected", () => {
+  for (const status of ["expired", "error", "revoked"] as const) {
+    const conn = {
+      provider: "google_calendar",
+      status,
+      displayName: null,
+      providerAccountEmail: null,
+      grantedScopes: [],
+      capabilities: [],
+      connectedAt: null,
+      disconnectedAt: null,
+      lastSyncedAt: null,
+      updatedAt: "2026-07-15T10:05:00.000Z",
+    } satisfies IntegrationConnectionView;
+    const item = toIntegrationStatusItem(GCAL_ENTRY, conn);
+    assert.equal(item.connectionStatus, status);
+    assert.equal(item.connected, false);
+  }
+});
+
+check("status: the safe item carries NO credential or scope fields", () => {
+  const conn: IntegrationConnectionView = {
+    provider: "google_calendar",
+    status: "connected",
+    displayName: "Google Calendar",
+    providerAccountEmail: "user@example.com",
+    grantedScopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+    capabilities: ["read_calendar_events"],
+    connectedAt: "2026-07-15T10:00:00.000Z",
+    disconnectedAt: null,
+    lastSyncedAt: null,
+    updatedAt: "2026-07-15T10:05:00.000Z",
+  };
+  const item = toIntegrationStatusItem(GCAL_ENTRY, conn);
+  const keys = Object.keys(item);
+  for (const forbidden of [
+    "accessToken",
+    "refreshToken",
+    "token",
+    "credential",
+    "grantedScopes",
+    "capabilities",
+  ]) {
+    assert.ok(!keys.includes(forbidden), `status item must not expose ${forbidden}`);
+  }
+  const blob = JSON.stringify(item);
+  // The catalogStatus is legitimately "available_readonly"; what must NOT appear
+  // is any raw OAuth scope URL.
+  assert.ok(!/googleapis\.com/.test(blob), "raw scope URLs must not appear in status");
+  assert.ok(!/auth\/calendar/.test(blob), "raw scope strings must not appear in status");
 });
 
 // --- Brain integration context (honest) ----------------------------------

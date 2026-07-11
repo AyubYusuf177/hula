@@ -485,6 +485,10 @@ model IntegrationOAuthState {
   state       String           @unique
   codeVerifier String?
   redirectUri String
+  /// Optional, validated app deep-link to return the user to Hula after the
+  /// callback (Section 13). Nullable + additive — never a token, never trusted
+  /// without passing the strict `isSafeAppReturnUrl` check.
+  appReturnUrl String?
   /// Scopes requested for this attempt (string[] stored as JSON).
   scopes      Json?
   status      OAuthStateStatus @default(pending)

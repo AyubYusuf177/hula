@@ -1,8 +1,8 @@
 import {
   GoogleCalendarError,
   getGoogleCalendarConnection,
-  getValidGoogleCalendarAccessToken,
   googleCalendarGet,
+  googleCalendarGetForConnection,
 } from "./client";
 import type { FetchLike } from "./oauth";
 import {
@@ -184,11 +184,6 @@ export async function fetchUpcomingGoogleCalendarEvents(
     throw new GoogleCalendarError("not_connected", "Google Calendar is not connected");
   }
 
-  const accessToken = await getValidGoogleCalendarAccessToken(
-    connection.id,
-    options.fetchImpl,
-  );
-
   const now = options.now ?? new Date();
   const window: CalendarTimeRange = options.range
     ? computeRange(options.range, now, options.timezone)
@@ -208,8 +203,11 @@ export async function fetchUpcomingGoogleCalendarEvents(
   };
   if (window.timeMax) query.timeMax = window.timeMax;
 
-  const data = await googleCalendarGet<{ items?: RawGoogleEvent[] }>(
-    accessToken,
+  // Connection-aware read: refreshes + retries once on a single 401. An HTTP-200
+  // response with `items: []` is a SUCCESSFUL empty calendar — it returns [] here
+  // and never becomes a provider error.
+  const data = await googleCalendarGetForConnection<{ items?: RawGoogleEvent[] }>(
+    connection.id,
     `/calendars/${encodeURIComponent(calendarId)}/events`,
     query,
     options.fetchImpl,

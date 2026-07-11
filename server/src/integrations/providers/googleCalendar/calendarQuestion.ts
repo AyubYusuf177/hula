@@ -1,7 +1,8 @@
 import { getUserTimezone } from "../../../reminders/reminders";
 import { logger } from "../../../utils/logger";
-import { GoogleCalendarError } from "./client";
+import { GoogleCalendarError, isReconnectReason } from "./client";
 import { fetchUpcomingGoogleCalendarEvents } from "./events";
+import { GOOGLE_CALENDAR_PROVIDER } from "./types";
 import type { CalendarRange, NormalizedCalendarEvent } from "./types";
 
 /**
@@ -24,6 +25,8 @@ export type CalendarIntent = CalendarRange | "none";
 export const CALENDAR_REPLIES = {
   notConnected:
     "I don’t have your Google Calendar connected yet. Once you connect it in Hula, I’ll be able to answer that.",
+  reconnect:
+    "It looks like my access to your Google Calendar has expired. Reconnect it in Hula and I’ll be able to check again.",
   unavailable:
     "I’m having trouble reaching your Google Calendar right now — mind trying again in a bit?",
 } as const;
@@ -222,10 +225,24 @@ export async function handleCalendarQuestion(
       reply: formatCalendarAnswer(intent, events, timezone),
     };
   } catch (err) {
-    if (err instanceof GoogleCalendarError && err.reason === "not_connected") {
-      return { handled: true, intent, reply: CALENDAR_REPLIES.notConnected };
+    if (err instanceof GoogleCalendarError) {
+      if (err.reason === "not_connected") {
+        return { handled: true, intent, reply: CALENDAR_REPLIES.notConnected };
+      }
+      // Safe structured log — a coded reason only, never a token or raw body.
+      logger.error("googleCalendar.question failed", {
+        provider: GOOGLE_CALENDAR_PROVIDER,
+        operation: "calendar.question",
+        errorCode: err.reason,
+        httpStatus: err.httpStatus,
+      });
+      // A dead grant asks the user to reconnect; everything else is transient.
+      const reply = isReconnectReason(err.reason)
+        ? CALENDAR_REPLIES.reconnect
+        : CALENDAR_REPLIES.unavailable;
+      return { handled: true, intent, reply };
     }
-    // Any other failure (refresh/expired/request) — stay honest, never pretend.
+    // Non-provider failure (DB/timezone/etc.) — stay honest, never pretend.
     logger.error("googleCalendar.question failed", {
       reason: err instanceof Error ? err.message : "unknown error",
     });

@@ -1134,6 +1134,7 @@ reads are live.
 | `npm run test:reminders`   | DB-backed reminder worker check (skips w/o DB URL; stubs sender; cleans up).|
 | `npm run test:integrations`| DB-backed integration foundation check (skips w/o DB URL; fake token; cleans up).|
 | `npm run test:google-calendar`| Offline Google Calendar check + (with DB URL) token-vault/refresh check using a FAKE Google endpoint; cleans up.|
+| `npm run test:google-calendar-real -- <id>`| REAL read-path diagnostic for one connected user (Clerk or Hula id). Hits real Google; prints ONLY booleans/stage/safe codes — no tokens or raw bodies.|
 | `npm run test:actions`     | DB-backed action runtime check (skips w/o DB URL; faked reads; cleans up).|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
