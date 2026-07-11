@@ -60,7 +60,9 @@ check("registry: every entry has complete, typed metadata", () => {
   for (const entry of listIntegrationCatalog()) {
     assert.ok(entry.displayName.length > 0, "displayName required");
     assert.ok(entry.category.length > 0, "category required");
-    assert.ok(["planned", "available_stub"].includes(entry.status));
+    assert.ok(
+      ["planned", "available_stub", "available_readonly"].includes(entry.status),
+    );
     assert.ok(["oauth2", "api_key", "partner", "none"].includes(entry.authType));
     assert.ok(Array.isArray(entry.defaultScopes));
     assert.ok(Array.isArray(entry.capabilities));
@@ -72,6 +74,20 @@ check("registry: google_calendar is the least-privilege first provider", () => {
   assert.ok(gcal, "google_calendar should exist");
   assert.equal(gcal?.authType, "oauth2");
   assert.ok((gcal?.defaultScopes.length ?? 0) > 0, "should declare default scopes");
+});
+
+check("registry: google_calendar is READ-ONLY (no write scope/capability)", () => {
+  const gcal = getProvider("google_calendar");
+  assert.equal(gcal?.status, "available_readonly");
+  // No scope may grant write access.
+  for (const scope of gcal?.defaultScopes ?? []) {
+    assert.ok(!/\.events\b(?!\.readonly)/.test(scope), `write-ish scope: ${scope}`);
+    assert.ok(/readonly/.test(scope), `scope must be read-only: ${scope}`);
+  }
+  // No capability may imply writing.
+  for (const cap of gcal?.capabilities ?? []) {
+    assert.ok(!/write|create|edit|delete/i.test(cap), `write capability leaked: ${cap}`);
+  }
 });
 
 check("registry: unknown provider is rejected", () => {

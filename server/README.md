@@ -912,6 +912,121 @@ curl -s https://YOUR-NGROK.ngrok-free.app/v1/me/integrations \
 tool/action execution, and no frontend integrations UI. `connect` is a `501`
 stub.
 
+## Section 11 — Google Calendar (read-only)
+
+Section 11 is Hula's **first real integration**. A user connects their Google
+Calendar over OAuth (Authorization Code + PKCE, least-privilege **read-only**
+scopes), tokens are stored **encrypted server-side** in the Section 10 token
+vault, and Hula answers calendar questions over iMessage from live data. There
+is **no** event creation/edit/delete, **no** Google push webhooks, and **no**
+automatic calendar reminders — this section proves the full read path only.
+
+### Google Cloud setup
+
+1. Create/select a project in the [Google Cloud Console](https://console.cloud.google.com/).
+2. **Enable the Google Calendar API** (APIs & Services → Library).
+3. Configure the **OAuth consent screen** (External is fine for dev; add your
+   Google account as a **Test user**).
+4. Create an **OAuth 2.0 Client ID** of type **Web application**.
+5. Under **Authorized redirect URIs**, add your ngrok callback (must match
+   exactly):
+
+   ```txt
+   https://YOUR-NGROK-URL/v1/integrations/google_calendar/callback
+   ```
+
+6. Set the server env (see `.env.example`):
+
+   ```bash
+   GOOGLE_OAUTH_CLIENT_ID=...
+   GOOGLE_OAUTH_CLIENT_SECRET=...
+   GOOGLE_OAUTH_REDIRECT_URI=https://YOUR-NGROK-URL/v1/integrations/google_calendar/callback
+   GOOGLE_CALENDAR_SCOPES=https://www.googleapis.com/auth/calendar.readonly
+   INTEGRATION_TOKEN_ENCRYPTION_KEY=<32-byte base64, e.g. openssl rand -base64 32>
+   ```
+
+   All Google values are **optional at boot** — the server starts without them.
+   If a user tries to connect while they're missing, `connect` returns a safe
+   `400 { "error": "google_calendar_not_configured" }` (never a crash).
+
+> Apply the additive migration first: it creates `integration_oauth_states`
+> (`prisma migrate deploy`, or `npm run prisma:migrate`). It touches no existing
+> data and stores **no** tokens.
+
+### Endpoints
+
+| Method + path | Auth | Purpose |
+| ------------- | ---- | ------- |
+| `POST /v1/me/integrations/google_calendar/connect` | Clerk bearer | Start OAuth; returns `{ provider, authorizationUrl, expiresAt }`. No tokens. |
+| `GET /v1/integrations/google_calendar/callback` | public (Google redirect) | Validates `state`, exchanges the code, stores an **encrypted** connection, shows a simple success page. |
+| `GET /v1/me/integrations/google_calendar/events?range=today\|tomorrow\|week\|next&limit=10` | Clerk bearer | Read the signed-in user's **own** normalized events. `409 { "error": "google_calendar_not_connected" }` when not connected. |
+
+### Local connect flow
+
+```bash
+# 1. Start backend + ngrok, confirm the redirect URI matches the OAuth client.
+# 2. While signed in, get an authorization URL:
+curl -s -X POST https://YOUR-NGROK-URL/v1/me/integrations/google_calendar/connect \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+# 3. Open authorizationUrl in a browser, approve the READ-ONLY consent.
+# 4. The callback shows "Google Calendar connected".
+# 5. Read events:
+curl -s "https://YOUR-NGROK-URL/v1/me/integrations/google_calendar/events?range=today" \
+  -H "Authorization: Bearer $CLERK_TOKEN" | jq
+```
+
+### Ask Hula over iMessage
+
+From your linked iMessage thread (once connected):
+
+```txt
+You:  What's on my calendar today?
+Hula: Here's today:
+      • 9:00 AM — Standup
+      • 3:00 PM — 1:1 with Sam
+
+You:  When's my next meeting?
+Hula: Your next event is "1:1 with Sam" on Wed, Jul 15 at 3:00 PM.
+
+You:  Can you create a calendar event?
+Hula: (honest — it can draft/plan but cannot create/edit/delete events yet)
+```
+
+If Google Calendar isn't connected, Hula replies honestly:
+*"I don't have your Google Calendar connected yet. Once you connect it in Hula,
+I'll be able to answer that."*
+
+### Security model
+
+- **Least-privilege, read-only** scope (`calendar.readonly`); no write scope path
+  exists.
+- Access/refresh tokens are encrypted (AES-256-GCM) via the Section 10 token
+  vault and stored server-side only — they are **never** returned to the app or
+  logged.
+- OAuth uses an unguessable **`state`** (CSRF) plus **PKCE**; state rows are
+  single-use and expire in 10 minutes.
+- Expired access tokens are refreshed **server-side**; a failed refresh marks the
+  connection `expired`.
+- Only **normalized** events (no raw Google payloads, no event descriptions)
+  leave the provider layer.
+
+### Verify it
+
+```bash
+# Offline unit tests: OAuth config/PKCE/URL, faked token exchange + refresh,
+# range computation, strict normalization (raw payload stripped), calendar intent
+# detection, answer formatting.
+npm test                       # includes scripts/googleCalendar.test.ts
+
+# Offline + (when DATABASE_URL is set) a DB-backed token-vault + refresh check
+# using a FAKE Google token endpoint — no real Google call, cleans up.
+npm run test:google-calendar
+```
+
+**Limitations (by design):** read-only calendar access; no event
+create/edit/delete; no Google push webhooks; no automatic calendar reminders; no
+frontend integrations UI.
+
 ## Scripts
 
 | Script                     | Description                                   |
@@ -919,12 +1034,13 @@ stub.
 | `npm run dev`              | Run with hot reload via `tsx watch`.          |
 | `npm run build`            | Compile TypeScript to `dist/`.                |
 | `npm run typecheck`        | Type-check without emitting.                  |
-| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders + integrations tests.|
+| `npm test`                 | Offline normalize + linking + query + brain + profile + messaging-status + memory + reminders + integrations + google-calendar tests.|
 | `npm run test:persistence` | DB-backed persistence check (skips w/o DB URL).|
 | `npm run test:brain`       | Manual real-brain check (uses key if present).|
 | `npm run test:memory`      | DB-backed memory check (skips w/o DB URL; cleans up).|
 | `npm run test:reminders`   | DB-backed reminder worker check (skips w/o DB URL; stubs sender; cleans up).|
 | `npm run test:integrations`| DB-backed integration foundation check (skips w/o DB URL; fake token; cleans up).|
+| `npm run test:google-calendar`| Offline Google Calendar check + (with DB URL) token-vault/refresh check using a FAKE Google endpoint; cleans up.|
 | `npm run prisma:generate`  | Generate the Prisma client from the schema.   |
 | `npm run prisma:migrate`   | Create + apply a dev migration to the DB.     |
 | `npm start`                | Run the compiled server.                      |
@@ -974,11 +1090,19 @@ src/
     parse.ts            #   pure date/time + timezone parsing (Intl, no deps)
     reminders.ts        #   command classify, title/phrasing, DB helpers, orchestrator
     worker.ts           #   conservative delivery worker (deterministic text)
-  integrations/         # integrations foundation (Section 10)
+  integrations/         # integrations foundation (Section 10) + Google Calendar (Section 11)
     catalog.ts          #   provider registry (metadata only, no OAuth/tokens)
     tokenVault.ts       #   AES-256-GCM server-only token encrypt/decrypt
     connections.ts      #   DB-backed connection status/upsert/disconnect + audit
+    credentials.ts      #   server-only encrypted token store/read/refresh (Section 11)
+    oauthState.ts       #   single-use OAuth state (CSRF) + PKCE verifier store (Section 11)
     policy.ts           #   action-risk policy gate (no execution yet)
+    providers/googleCalendar/ # read-only Google Calendar (Section 11)
+      oauth.ts          #     config, PKCE, auth URL, token exchange/refresh
+      client.ts         #     connection lookup + valid-access-token (refresh) + GET
+      events.ts         #     range computation + strict event normalization + fetch
+      calendarQuestion.ts #   intent detection + deterministic answers + orchestrator
+      types.ts          #     normalized event + raw Google shapes
     types.ts / registry.ts # legacy Section 1 agent-tool placeholders
   actions/              # ActionApproval placeholders
   billing/              # Subscription placeholders
@@ -1006,9 +1130,11 @@ prisma/
   Calendar/Zoom/Gmail/Notion sources are reserved (`future_*`) but not built
 - Voice note / media transcription (inbound media URLs are preserved, not processed)
 - Webhook signature verification
-- Real integration OAuth / provider data sync / action execution — Section 10 adds
-  the **foundation** (registry, models, encrypted token vault, status endpoints,
-  action policy), but `connect` is a `501` stub and nothing talks to a provider
+- Provider **write/action** execution — Section 11 adds read-only Google Calendar
+  (connect + read events + answer over iMessage), but Hula cannot create/edit/
+  delete events, and other providers' `connect` is still a `501` stub
+- Google Calendar **push webhooks** and **automatic calendar reminders** — not
+  built; reads are on-demand only
 - Billing, WhatsApp, chat-history/frontend/reminders/integrations UI
 
 These arrive in later sections.

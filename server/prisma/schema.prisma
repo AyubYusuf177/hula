@@ -93,6 +93,17 @@ enum IntegrationConnectionStatus {
   error
 }
 
+/// Lifecycle of a short-lived OAuth authorization attempt (Section 11). A row is
+/// created when a user starts an OAuth connect (`pending`), consumed exactly once
+/// when the provider redirects back with a matching `state` (`consumed`), or
+/// `expired` if it times out / is reused. Used for CSRF protection and to carry
+/// the PKCE code verifier between the connect and callback requests.
+enum OAuthStateStatus {
+  pending
+  consumed
+  expired
+}
+
 /// A Hula account, keyed off the Clerk user id.
 model User {
   id          String  @id @default(cuid())
@@ -111,6 +122,7 @@ model User {
   integrationConnections IntegrationConnection[]
   integrationEvents      IntegrationEvent[]
   integrationActionLogs  IntegrationActionLog[]
+  integrationOAuthStates IntegrationOAuthState[]
 
   @@map("users")
 }
@@ -429,4 +441,31 @@ model IntegrationActionLog {
 
   @@index([userId, provider, createdAt])
   @@map("integration_action_logs")
+}
+
+/// A short-lived, single-use OAuth authorization attempt (Section 11).
+///
+/// Created when a user starts connecting a provider (Google Calendar today). The
+/// unguessable `state` is echoed back by the provider on redirect, giving CSRF
+/// protection, and `codeVerifier` carries the PKCE secret between the connect and
+/// callback requests. Rows are consumed exactly once and expire quickly; they
+/// hold NO tokens — real tokens land only in `IntegrationCredential`, encrypted.
+model IntegrationOAuthState {
+  id          String           @id @default(cuid())
+  userId      String
+  provider    String
+  state       String           @unique
+  codeVerifier String?
+  redirectUri String
+  /// Scopes requested for this attempt (string[] stored as JSON).
+  scopes      Json?
+  status      OAuthStateStatus @default(pending)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, provider, status])
+  @@map("integration_oauth_states")
 }

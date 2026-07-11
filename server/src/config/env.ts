@@ -52,6 +52,15 @@ const envSchema = z.object({
   // (base64 or hex) when set; the token vault validates it lazily at use time.
   INTEGRATION_TOKEN_ENCRYPTION_KEY: z.string().optional(),
 
+  // Google Calendar OAuth (Section 11) — all OPTIONAL. Required only when a user
+  // actually starts the Google Calendar connect flow; the server boots and runs
+  // without them. A missing value surfaces as a safe configuration error at
+  // connect time, never a startup crash. Least-privilege READ-ONLY scopes only.
+  GOOGLE_OAUTH_CLIENT_ID: z.string().optional(),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_OAUTH_REDIRECT_URI: z.string().optional(),
+  GOOGLE_CALENDAR_SCOPES: z.string().optional(),
+
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),
 });

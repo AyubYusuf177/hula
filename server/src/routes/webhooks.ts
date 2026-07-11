@@ -22,6 +22,7 @@ import { resolveInboundLink } from "../users/linking";
 import { loadBrainContextForUser } from "../users/profile";
 import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
 import { listConnectedProviderNames } from "../integrations/connections";
+import { handleCalendarQuestion } from "../integrations/providers/googleCalendar/calendarQuestion";
 import { handleReminderCommand } from "../reminders/reminders";
 import type { HulaPromptContext } from "../ai/prompts";
 import { logger } from "../utils/logger";
@@ -232,6 +233,17 @@ async function processInbound(message: InboundMessage): Promise<void> {
         ? await handleReminderCommand(userId, message.content.text)
         : { handled: false as const };
 
+    // Calendar questions ("what's on my calendar today", "when's my next
+    // meeting") are answered from the user's connected Google Calendar (Section
+    // 11), read-only. Handled after memory/reminders and before the brain. If
+    // Google Calendar isn't connected, this replies honestly that it isn't.
+    const calendar =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply)
+        ? await handleCalendarQuestion(userId, message.content.text)
+        : { handled: false as const };
+
     if (memory.handled && memory.reply) {
       replyText = memory.reply;
       logger.info("sendblue.webhook memory command", {
@@ -243,6 +255,12 @@ async function processInbound(message: InboundMessage): Promise<void> {
       logger.info("sendblue.webhook reminder command", {
         sender: maskHandle(to),
         intent: reminder.intent,
+      });
+    } else if (calendar.handled && calendar.reply) {
+      replyText = calendar.reply;
+      logger.info("sendblue.webhook calendar question", {
+        sender: maskHandle(to),
+        intent: calendar.intent,
       });
     } else {
       const brain = await generateBrainReply(message, conversationId, userId);

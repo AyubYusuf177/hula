@@ -33,8 +33,11 @@ export type ProviderCategory =
   | "aggregator"
   | "generic";
 
-/** Whether a provider is merely planned or a wireable (but inert) stub. */
-export type ProviderStatus = "planned" | "available_stub";
+/**
+ * Whether a provider is merely planned, a wireable (but inert) stub, or actually
+ * wired for READ-ONLY access (Section 11 — Google Calendar is the first).
+ */
+export type ProviderStatus = "planned" | "available_stub" | "available_readonly";
 
 /** How a provider authenticates (no flow is implemented yet). */
 export type ProviderAuthType = "oauth2" | "api_key" | "partner" | "none";
@@ -64,11 +67,14 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     provider: "google_calendar",
     displayName: "Google Calendar",
     category: "calendar",
-    status: "planned",
+    status: "available_readonly",
     authType: "oauth2",
-    defaultScopes: ["https://www.googleapis.com/auth/calendar.events.readonly"],
-    capabilities: ["calendar.read", "calendar.freebusy", "calendar.events.write"],
-    notes: "First planned provider. OAuth (Authorization Code + PKCE) added later.",
+    // Least-privilege READ-ONLY. `calendar.readonly` covers listing calendars and
+    // reading events. NO write scope is requested — Hula cannot create/edit/delete.
+    defaultScopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+    capabilities: ["read_calendar_events", "list_calendars"],
+    notes:
+      "First live integration (Section 11). Read-only OAuth (Authorization Code + PKCE). No event writes.",
   },
   {
     provider: "gmail",
