@@ -69,12 +69,18 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     category: "calendar",
     status: "available_readonly",
     authType: "oauth2",
-    // Least-privilege READ-ONLY. `calendar.readonly` covers listing calendars and
-    // reading events. NO write scope is requested — Hula cannot create/edit/delete.
-    defaultScopes: ["https://www.googleapis.com/auth/calendar.readonly"],
-    capabilities: ["read_calendar_events", "list_calendars"],
+    // Section 15: request BOTH the read-only scope (list calendars) AND the
+    // write scope (`calendar.events`) so a newly connected user can have Hula
+    // create/update/delete events on their behalf. `calendar.events` also grants
+    // event reads, so the read path keeps working. A connection made before this
+    // change holds only `calendar.readonly` and must be reconnected to write.
+    defaultScopes: [
+      "https://www.googleapis.com/auth/calendar.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
+    ],
+    capabilities: ["read_calendar_events", "list_calendars", "write_calendar_events"],
     notes:
-      "First live integration (Section 11). Read-only OAuth (Authorization Code + PKCE). No event writes.",
+      "Live integration. Read (Section 11) + create/update/delete events (Section 15) via OAuth (Authorization Code + PKCE). Writes require the calendar.events scope.",
   },
   {
     provider: "gmail",

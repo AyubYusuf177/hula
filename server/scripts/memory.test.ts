@@ -75,6 +75,41 @@ check("classify: 'delete that memory about my diet' is forget-match", () => {
   assert.equal(cmd.intent === "forget" && cmd.scope === "match" && cmd.query, "my diet");
 });
 
+// --- Calendar-delete vs memory-delete routing (Section 15 fix) -----------
+
+check("classify: explicit CALENDAR event deletes are NOT memory commands", () => {
+  // These must fall through so the Section 15 Calendar-write handler runs.
+  for (const msg of [
+    "Delete the Hula calendar test tomorrow at 4pm",
+    "Delete lunch with Adam tomorrow",
+    "Cancel my meeting tomorrow at 2pm",
+    "Remove the Project Planning event from my calendar",
+    "Delete my 4pm calendar event tomorrow",
+  ]) {
+    assert.equal(classifyMemoryCommand(msg).intent, "none", `should not be memory: ${msg}`);
+  }
+});
+
+check("classify: saved-memory deletes STILL route to memory forget", () => {
+  const coffee = classifyMemoryCommand("Forget that I like coffee");
+  assert.equal(coffee.intent, "forget");
+  assert.equal(coffee.intent === "forget" && coffee.scope, "match");
+
+  const savedMemory = classifyMemoryCommand("Delete the saved memory about Adam");
+  assert.equal(savedMemory.intent, "forget", "explicit 'memory' keeps it a memory command");
+
+  const fromMemory = classifyMemoryCommand("Remove that from your memory");
+  assert.equal(fromMemory.intent, "forget", "explicit 'memory' keeps it a memory command");
+
+  const restaurant = classifyMemoryCommand("Forget what I told you about my favourite restaurant");
+  assert.equal(restaurant.intent, "forget");
+});
+
+check("classify: 'delete that memory about my diet' still routes to memory", () => {
+  // A calendar date/time cue is absent and 'memory' is explicit → stays memory.
+  assert.equal(classifyMemoryCommand("delete that memory about my diet").intent, "forget");
+});
+
 check("classify: list questions are list commands", () => {
   assert.equal(classifyMemoryCommand("What do you remember about me?").intent, "list");
   assert.equal(classifyMemoryCommand("what have you remembered?").intent, "list");

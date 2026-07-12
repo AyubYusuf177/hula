@@ -13,7 +13,10 @@ import { GOOGLE_CALENDAR_PROVIDER } from "./types";
  * injectable `fetchImpl` so tests never hit the real Google endpoints.
  *
  * Hard rules:
- *   - Only READ-ONLY scopes are ever requested. There is no write scope path.
+ *   - Scopes come from `GOOGLE_CALENDAR_SCOPES` or the catalog default. As of
+ *     Section 15 the default requests the read-only scope AND the write scope
+ *     (`calendar.events`) so Hula can create/update/delete events with consent.
+ *     No other scope is ever requested.
  *   - Client secret and tokens are NEVER logged or put into a thrown message.
  *   - Missing config surfaces as `GoogleOAuthConfigError`, never a crash.
  */
@@ -56,8 +59,8 @@ export function isGoogleOAuthConfigured(): boolean {
 /**
  * Resolve the Google OAuth config from env, or throw `GoogleOAuthConfigError`.
  * Scopes come from `GOOGLE_CALENDAR_SCOPES` (space-separated) or fall back to the
- * catalog default. This never returns a write scope — the env is expected to be
- * read-only, matching the consent screen the user approves.
+ * catalog default (read-only + `calendar.events` write since Section 15). The
+ * requested scopes match the consent screen the user approves.
  */
 export function getGoogleOAuthConfig(): GoogleOAuthConfig {
   const clientId = env.GOOGLE_OAUTH_CLIENT_ID?.trim();

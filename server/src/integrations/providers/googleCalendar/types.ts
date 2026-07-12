@@ -10,6 +10,19 @@
 /** The stable provider slug for Google Calendar (matches the catalog). */
 export const GOOGLE_CALENDAR_PROVIDER = "google_calendar" as const;
 
+/** Read-only Calendar scope (list calendars + read events). */
+export const CALENDAR_READONLY_SCOPE =
+  "https://www.googleapis.com/auth/calendar.readonly";
+
+/**
+ * Write-capable Calendar scope (create/update/delete events). Section 15 adds
+ * this to the requested scopes so a newly connected user can have Hula act on
+ * their calendar. A connection that predates this only holds the read-only scope
+ * and must be reconnected before any write can run.
+ */
+export const CALENDAR_EVENTS_SCOPE =
+  "https://www.googleapis.com/auth/calendar.events";
+
 /** A time window to query events over. */
 export interface CalendarTimeRange {
   /** RFC3339 lower bound (inclusive). */
@@ -38,6 +51,13 @@ export interface NormalizedCalendarEvent {
   htmlLink: string | null;
   attendeeCount: number | null;
   organizerEmail: string | null;
+  /**
+   * The id of the recurring series this event instance belongs to, when it is
+   * one (Section 15). `null`/absent for ordinary one-off events. Used ONLY as a
+   * safety signal — a write that resolves to a recurring instance asks the user
+   * to clarify rather than risk touching the whole series.
+   */
+  recurringEventId?: string | null;
   source: typeof GOOGLE_CALENDAR_PROVIDER;
 }
 
@@ -52,4 +72,8 @@ export interface RawGoogleEvent {
   end?: { dateTime?: string; date?: string; timeZone?: string };
   attendees?: unknown[];
   organizer?: { email?: string; displayName?: string; self?: boolean };
+  /** Present when this event is an instance of a recurring series. */
+  recurringEventId?: string;
+  /** Present on the master event of a recurring series. */
+  recurrence?: unknown[];
 }

@@ -125,6 +125,15 @@ export function normalizeGoogleEvent(
     attendeeCount: Array.isArray(raw.attendees) ? raw.attendees.length : null,
     organizerEmail:
       typeof raw.organizer?.email === "string" ? raw.organizer.email : null,
+    // Recurring-series safety signal: an instance carries `recurringEventId`;
+    // a master event carries a `recurrence` array (we mark it non-null too so a
+    // write can detect and avoid touching a whole series).
+    recurringEventId:
+      typeof raw.recurringEventId === "string"
+        ? raw.recurringEventId
+        : Array.isArray(raw.recurrence) && raw.recurrence.length > 0
+          ? (typeof raw.id === "string" ? raw.id : "recurring")
+          : null,
     source: GOOGLE_CALENDAR_PROVIDER,
   };
 }

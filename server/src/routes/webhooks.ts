@@ -23,6 +23,7 @@ import { loadBrainContextForUser } from "../users/profile";
 import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
 import { listConnectedProviderNames } from "../integrations/connections";
 import { handleCalendarQuestion } from "../integrations/providers/googleCalendar/calendarQuestion";
+import { handleCalendarWrite } from "../integrations/providers/googleCalendar/calendarActions";
 import { handleGmailQuestion } from "../integrations/providers/gmail/gmailQuestion";
 import { handleActionConfirmation } from "../actions/confirmations";
 import { handleActionIntent } from "../actions/detect";
@@ -247,17 +248,33 @@ async function processInbound(message: InboundMessage): Promise<void> {
         ? await handleActionConfirmation(userId, message.content.text)
         : { handled: false as const };
 
-    // Imperative action intents (Section 12) — "schedule … at 7pm", "send an
-    // email to …", "create a task …". These map to typed Hula actions; every
-    // write/send action is still a STUB, so the runtime replies HONESTLY that the
-    // action isn't enabled yet (and logs a blocked ledger entry) rather than
-    // pretending. Runs before the read-only calendar handler so an imperative
-    // "schedule …" isn't mistaken for a calendar question.
-    const actionIntent =
+    // Calendar WRITES (Section 15) — "schedule lunch with Adam tomorrow at 1pm",
+    // "move lunch with Adam to 2pm", "delete lunch with Adam tomorrow". These
+    // create/update/delete real events on the user's connected Google Calendar via
+    // the dedicated Calendar action service (model extraction → deterministic
+    // validation → provider write → confirmation from Google's response). Runs
+    // before the generic action-intent stub so an imperative "schedule …" performs
+    // the write instead of the honest "not enabled yet" reply; if the model can't
+    // be reached this returns handled:false and falls through to that stub.
+    const calendarWrite =
       userId &&
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
       !(confirmation.handled && confirmation.reply)
+        ? await handleCalendarWrite(userId, message.content.text)
+        : { handled: false as const };
+
+    // Imperative action intents (Section 12) — "send an email to …", "create a
+    // task …". These map to typed Hula actions; email/task write/send actions are
+    // still STUBS, so the runtime replies HONESTLY that the action isn't enabled
+    // yet (and logs a blocked ledger entry) rather than pretending. Calendar
+    // writes are handled above, so they never reach here.
+    const actionIntent =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply) &&
+      !(calendarWrite.handled && calendarWrite.reply)
         ? await handleActionIntent(userId, message.content.text)
         : { handled: false as const };
 
@@ -270,6 +287,7 @@ async function processInbound(message: InboundMessage): Promise<void> {
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
       !(confirmation.handled && confirmation.reply) &&
+      !(calendarWrite.handled && calendarWrite.reply) &&
       !(actionIntent.handled && actionIntent.reply)
         ? await handleCalendarQuestion(userId, message.content.text)
         : { handled: false as const };
@@ -286,6 +304,7 @@ async function processInbound(message: InboundMessage): Promise<void> {
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
       !(confirmation.handled && confirmation.reply) &&
+      !(calendarWrite.handled && calendarWrite.reply) &&
       !(actionIntent.handled && actionIntent.reply) &&
       !(calendar.handled && calendar.reply)
         ? await handleGmailQuestion(userId, message.content.text)
@@ -308,6 +327,12 @@ async function processInbound(message: InboundMessage): Promise<void> {
       logger.info("sendblue.webhook action confirmation", {
         sender: maskHandle(to),
         outcome: confirmation.outcome,
+      });
+    } else if (calendarWrite.handled && calendarWrite.reply) {
+      replyText = calendarWrite.reply;
+      logger.info("sendblue.webhook calendar write", {
+        sender: maskHandle(to),
+        action: calendarWrite.action,
       });
     } else if (actionIntent.handled && actionIntent.reply) {
       replyText = actionIntent.reply;

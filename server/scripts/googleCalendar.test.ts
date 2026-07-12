@@ -100,10 +100,15 @@ check("oauth: resolves config from env and defaults scopes to catalog", () => {
     assert.equal(isGoogleOAuthConfigured(), true);
     const config = getGoogleOAuthConfig();
     assert.equal(config.clientId, "id.apps.googleusercontent.com");
-    // Scopes fall back to the catalog's least-privilege read-only default.
+    // Scopes fall back to the catalog default (read-only + calendar.events write
+    // since Section 15). The read-only scope is always still present.
     const def = getProvider("google_calendar")?.defaultScopes ?? [];
     assert.deepEqual(config.scopes, def);
-    assert.ok(config.scopes.every((s) => /readonly/.test(s)), "scopes must be read-only");
+    assert.ok(
+      config.scopes.includes("https://www.googleapis.com/auth/calendar.readonly"),
+      "read-only scope must be preserved",
+    );
+    assert.ok(config.scopes.every((s) => /calendar\.(readonly|events)$/.test(s)), "only calendar scopes");
   } finally {
     env.GOOGLE_OAUTH_CLIENT_ID = saved.id;
     env.GOOGLE_OAUTH_CLIENT_SECRET = saved.secret;

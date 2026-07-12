@@ -80,18 +80,29 @@ check("registry: google_calendar is the least-privilege first provider", () => {
   assert.ok((gcal?.defaultScopes.length ?? 0) > 0, "should declare default scopes");
 });
 
-check("registry: google_calendar is READ-ONLY (no write scope/capability)", () => {
+check("registry: google_calendar requests read + write scopes (Section 15)", () => {
   const gcal = getProvider("google_calendar");
-  assert.equal(gcal?.status, "available_readonly");
-  // No scope may grant write access.
-  for (const scope of gcal?.defaultScopes ?? []) {
-    assert.ok(!/\.events\b(?!\.readonly)/.test(scope), `write-ish scope: ${scope}`);
-    assert.ok(/readonly/.test(scope), `scope must be read-only: ${scope}`);
+  // Section 15 adds create/update/delete, so the provider is write-capable now.
+  // It must STILL request the read-only scope (never dropped) AND the write
+  // scope, and only those two least-privilege Calendar scopes.
+  const scopes = gcal?.defaultScopes ?? [];
+  assert.ok(
+    scopes.includes("https://www.googleapis.com/auth/calendar.readonly"),
+    "read-only scope must be preserved",
+  );
+  assert.ok(
+    scopes.includes("https://www.googleapis.com/auth/calendar.events"),
+    "write scope (calendar.events) must be requested",
+  );
+  // No scope may grant more than event-level access (no full calendar admin).
+  for (const scope of scopes) {
+    assert.ok(/calendar\.(readonly|events)$/.test(scope), `unexpected scope: ${scope}`);
   }
-  // No capability may imply writing.
-  for (const cap of gcal?.capabilities ?? []) {
-    assert.ok(!/write|create|edit|delete/i.test(cap), `write capability leaked: ${cap}`);
-  }
+  // The write capability is now present (needed by the write actions).
+  assert.ok(
+    (gcal?.capabilities ?? []).includes("write_calendar_events"),
+    "write_calendar_events capability must be present",
+  );
 });
 
 check("registry: unknown provider is rejected", () => {

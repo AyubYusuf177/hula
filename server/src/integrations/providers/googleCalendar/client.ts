@@ -124,6 +124,8 @@ export function classifyCalendarHttpError(
     return "provider_unavailable";
   }
   if (status === 404) return "calendar_not_found";
+  // 410 Gone — the event was already deleted; treat as "not found" for writes.
+  if (status === 410) return "calendar_not_found";
   if (status === 429) return "provider_rate_limited";
   if (status >= 500) return "provider_unavailable";
   return "provider_unavailable";
@@ -548,4 +550,141 @@ export async function googleCalendarGetForConnection<T>(
 /** Whether a reason means the user must reconnect (grant no longer usable). */
 export function isReconnectReason(reason: GoogleCalendarErrorReason): boolean {
   return RECONNECT_REASONS.has(reason);
+}
+
+// --- Write-capable requests (Section 15) ---------------------------------
+
+/** HTTP methods a Calendar WRITE may use. GET stays on `googleCalendarGet`. */
+export type GoogleCalendarWriteMethod = "POST" | "PATCH" | "DELETE";
+
+/**
+ * Authenticated write (POST/PATCH/DELETE) against the Google Calendar API.
+ *
+ * Mirrors `googleCalendarGet`'s SAFETY exactly — the same absolute-URL building,
+ * token-shape guard, per-attempt abort timeout, precise fetch-exception mapping,
+ * and classified HTTP-error mapping (the raw provider body is NEVER thrown). The
+ * only differences from the GET path are the method and a JSON body: unlike GET,
+ * a write MAY carry a body, so the undici "GET must not have a body" guard does
+ * not apply here. A `204 No Content` (typical for DELETE) returns `{}` as `T`.
+ * `fetchImpl` is injectable for tests.
+ */
+export async function googleCalendarRequest<T>(
+  accessToken: string,
+  method: GoogleCalendarWriteMethod,
+  path: string,
+  options: { query?: Record<string, string>; body?: unknown } = {},
+  fetchImpl?: FetchLike,
+  connectionId?: string,
+): Promise<T> {
+  const doFetch = fetchImpl ?? (fetch as unknown as FetchLike);
+
+  // Build an ABSOLUTE URL with URL + URLSearchParams (never string concat).
+  const url = buildGoogleCalendarUrl(path, options.query ?? {});
+
+  // The access token must be a plain, non-empty ASCII string (same guard as GET).
+  if (
+    typeof accessToken !== "string" ||
+    accessToken.length === 0 ||
+    // eslint-disable-next-line no-control-regex
+    /[^\x20-\x7e]/.test(accessToken)
+  ) {
+    throw new GoogleCalendarError(
+      "invalid_request_headers",
+      "Google access token is not a valid Authorization header value",
+    );
+  }
+
+  const headers: Record<string, string> = { authorization: `Bearer ${accessToken}` };
+  const hasBody = options.body !== undefined && method !== "DELETE";
+  const body = hasBody ? JSON.stringify(options.body) : undefined;
+  if (hasBody) headers["content-type"] = "application/json";
+
+  // A FRESH AbortController + timer per attempt (retries call this again).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+
+  let res: { ok: boolean; status: number; text: () => Promise<string> };
+  try {
+    res = await doFetch(url.toString(), {
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const reason = classifyFetchException(err);
+    logFetchException({
+      operation: `${method} ${url.pathname}`,
+      err,
+      requestHost: url.host,
+      requestPath: url.pathname,
+      mappedErrorCode: reason,
+      connectionId,
+    });
+    const cause = safeFetchCause(err);
+    throw new GoogleCalendarError(
+      reason,
+      "Network request to Google failed before an HTTP response",
+      null,
+      { name: cause.name, code: cause.code },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    let errBody = "";
+    try {
+      errBody = (await res.text()).slice(0, 500);
+    } catch {
+      errBody = "";
+    }
+    const reason = classifyCalendarHttpError(res.status, errBody);
+    throw new GoogleCalendarError(reason, `Google Calendar request failed (${res.status})`, res.status);
+  }
+
+  // A successful write may return an empty body (204 for DELETE). Treat empty as
+  // an empty object so callers get a consistent, safe shape.
+  let text = "";
+  try {
+    text = await res.text();
+  } catch {
+    text = "";
+  }
+  if (text.trim().length === 0) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new GoogleCalendarError(
+      "malformed_provider_response",
+      "Google Calendar returned an unparseable response",
+    );
+  }
+}
+
+/**
+ * Connection-aware Calendar WRITE with exactly ONE refresh + retry on a single
+ * valid authentication failure (HTTP 401) — the same policy the read path uses.
+ * If the retry still 401s, the connection is marked `expired` and an
+ * `invalid_grant` error is thrown. Reuses the existing token store/refresh.
+ */
+export async function googleCalendarRequestForConnection<T>(
+  connectionId: string,
+  method: GoogleCalendarWriteMethod,
+  path: string,
+  options: { query?: Record<string, string>; body?: unknown } = {},
+  fetchImpl?: FetchLike,
+): Promise<T> {
+  try {
+    return await requestWithAuthRetry<T>({
+      getAccessToken: () => getValidGoogleCalendarAccessToken(connectionId, fetchImpl),
+      refresh: () => forceRefreshGoogleCalendarAccessToken(connectionId, fetchImpl),
+      doGet: (token) =>
+        googleCalendarRequest<T>(token, method, path, options, fetchImpl, connectionId),
+      onInvalidGrant: () => markConnection(connectionId, "expired"),
+    });
+  } catch (err) {
+    logProviderError(`${method} ${path}`, err, connectionId);
+    throw err;
+  }
 }

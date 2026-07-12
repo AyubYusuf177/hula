@@ -88,6 +88,35 @@ const CLEAR_MEMORY_RE = /^(?:please\s+)?clear\s+my\s+memor(?:y|ies)\b/i;
 // Forget-a-specific-thing phrasing. The remainder is the match query.
 const FORGET_MATCH_RE = /^(?:please\s+)?(?:forget|delete|remove)\b(.*)$/i;
 
+// Calendar-event delete disambiguation (Section 15 routing fix).
+//
+// "delete"/"remove" are shared with the Calendar-write handler ("delete lunch
+// with Adam tomorrow", "remove the Project Planning event from my calendar").
+// Because memory runs before the Calendar handler in the webhook, an explicit
+// CALENDAR delete would otherwise be swallowed here and answered as a saved-memory
+// deletion. These patterns detect that a delete/remove targets a calendar EVENT —
+// calendar terminology or an explicit date/time reference — so it is left for the
+// Calendar-write handler instead. "forget" is memory-only and never guarded, and
+// an explicit "memory"/"memories" always stays a memory command.
+const CALENDAR_EVENT_CONTEXT_RE = /\b(?:calendars?|events?|appointments?|meetings?)\b/i;
+const CALENDAR_DATETIME_CUE_RE =
+  /\b(?:\d{1,2}\s?(?:am|pm)|\d{1,2}:\d{2}|noon|midnight|tonight|tomorrow|today|next week|this (?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day|on (?:mon|tue|wed|thu|fri|sat|sun))\b/i;
+const EXPLICIT_MEMORY_RE = /\bmemor(?:y|ies)\b/i;
+
+/**
+ * Pure: whether a message is an explicit CALENDAR event delete (so it must NOT be
+ * treated as a saved-memory deletion). Only `delete`/`remove` phrasings qualify —
+ * `forget` is always memory. An explicit "memory"/"memories" reference always wins
+ * for memory. Otherwise a calendar noun OR a concrete date/time reference marks it
+ * as a calendar event operation.
+ */
+export function isCalendarEventDelete(text: string): boolean {
+  const trimmed = (text ?? "").trim();
+  if (!/^(?:please\s+)?(?:delete|remove)\b/i.test(trimmed)) return false;
+  if (EXPLICIT_MEMORY_RE.test(trimmed)) return false;
+  return CALENDAR_EVENT_CONTEXT_RE.test(trimmed) || CALENDAR_DATETIME_CUE_RE.test(trimmed);
+}
+
 // List phrasing.
 const LIST_RES = [
   /what do you remember/i,
@@ -124,6 +153,11 @@ export function classifyMemoryCommand(text: string | undefined): MemoryCommand {
 
   const remember = REMEMBER_RE.exec(trimmed);
   if (remember?.[1]) return { intent: "remember", content: remember[1].trim() };
+
+  // An explicit CALENDAR event delete ("delete lunch with Adam tomorrow",
+  // "remove the Project Planning event from my calendar") is NOT a saved-memory
+  // command — leave it for the Section 15 Calendar-write handler downstream.
+  if (isCalendarEventDelete(trimmed)) return { intent: "none" };
 
   // Forget everything.
   if (FORGET_ALL_RE.test(trimmed) || CLEAR_MEMORY_RE.test(trimmed)) {
