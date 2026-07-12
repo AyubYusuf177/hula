@@ -106,6 +106,28 @@ check('view: exposes a safe account label only', () => {
   assert.equal(v.accountLabel, 'me@example.com');
 });
 
+check('view: an explicitly disconnected backend status reports disconnected', () => {
+  // After a real backend disconnect, GET status returns connectionStatus
+  // "disconnected"; the card must reflect that (no lingering connected UI).
+  const v = deriveIntegrationView(status('gmail', 'disconnected'));
+  assert.equal(v.state, 'disconnected');
+  assert.equal(v.connected, false);
+  assert.equal(v.statusLabel, 'Not connected');
+  assert.equal(v.accountLabel, null);
+});
+
+check('view: refreshing from connected → disconnected flips the card back', () => {
+  // Models the UI re-reading backend truth after a disconnect: same provider,
+  // two successive backend reads, the second wins.
+  const before = deriveIntegrationView(
+    status('gmail', 'connected', { providerAccountEmail: 'me@example.com' }),
+  );
+  assert.equal(before.connected, true);
+  const after = deriveIntegrationView(status('gmail', 'disconnected'));
+  assert.equal(after.connected, false);
+  assert.equal(after.state, 'disconnected');
+});
+
 // --- deriveHeroProviderIds -----------------------------------------------
 
 check('hero: lists connected providers only', () => {

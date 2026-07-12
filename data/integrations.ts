@@ -13,7 +13,7 @@
 import type { ImageSourcePropType } from 'react-native';
 
 import { integrationIcons } from '@/constants/images';
-import { GOOGLE_CALENDAR_PROVIDER } from '@/lib/hulaApi';
+import { GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER } from '@/lib/hulaApi';
 
 /** A display category grouping on the Integrations screen. */
 export type IntegrationCategoryId = 'ORGANIZATION';
@@ -24,7 +24,7 @@ export interface IntegrationProviderConfig {
   id: string;
   displayName: string;
   category: IntegrationCategoryId;
-  /** Real product icon (PNG) shown in the card, hero orbit, and details sheet. */
+  /** Real product icon (PNG) shown in the card and details sheet. */
   iconImage: ImageSourcePropType;
   /** Accent color used for the connected glow/border and the icon badge. */
   accent: string;
@@ -38,14 +38,6 @@ export interface IntegrationProviderConfig {
   sheetBody: string;
   /** Details sheet body once connected — describes what is enabled today. */
   connectedBody: string;
-  /** Short privacy reassurance shown in the sheet. */
-  privacyNote: string;
-  /** Capabilities available today (read-only). */
-  capabilities: string[];
-  /** Capabilities planned for later (clearly not enabled yet). */
-  comingLater: string[];
-  /** Honest limitation line for the sheet. */
-  limitation: string;
   /** Primary connect button label. */
   connectLabel: string;
   /** Label once connected. */
@@ -63,28 +55,31 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     category: 'ORGANIZATION',
     iconImage: integrationIcons.google_calendar,
     accent: '#5CA8FF',
-    summary: 'Read your upcoming events and answer calendar questions from iMessage.',
-    sheetHeading: 'Connect Google Calendar',
-    connectedHeading: 'Google Calendar connected',
+    summary: 'Reads your schedule to answer calendar questions.',
+    sheetHeading: 'Google Calendar',
+    connectedHeading: 'Google Calendar',
     sheetBody:
-      'Connect your Google Calendar so Hula can read your schedule and answer calendar questions directly from iMessage.',
+      'Connect your Google Calendar to answer scheduling questions right from iMessage. Read-only — Hula never changes your calendar.',
     connectedBody:
-      'Hula can now read your upcoming events and answer calendar questions right from iMessage. Read-only for now — it never changes your calendar.',
-    privacyNote:
-      'Your Google tokens stay encrypted on Hula’s server and are never stored in the mobile app.',
-    capabilities: [
-      'Read your upcoming events',
-      'Answer calendar questions from iMessage',
-      'Find your next meeting',
-    ],
-    comingLater: [
-      'Create events after confirmation',
-      'Reschedule meetings',
-      'Meeting preparation',
-    ],
-    limitation: 'Calendar creation and editing are not enabled yet.',
+      'Hula can read your schedule and answer calendar questions from iMessage. Read-only — it never changes your calendar.',
     connectLabel: 'Connect Google',
     disconnectLabel: 'Disconnect Google Calendar',
+  },
+  {
+    id: GMAIL_PROVIDER,
+    displayName: 'Gmail',
+    category: 'ORGANIZATION',
+    iconImage: integrationIcons.gmail,
+    accent: '#EA4335',
+    summary: 'Reads your inbox to answer email questions.',
+    sheetHeading: 'Gmail',
+    connectedHeading: 'Gmail',
+    sheetBody:
+      'Connect Gmail to answer email questions right from iMessage. Read-only — Hula never sends, deletes or changes your email.',
+    connectedBody:
+      'Hula can read and search your inbox to answer email questions from iMessage. Read-only — it never sends, deletes or changes your email.',
+    connectLabel: 'Connect Gmail',
+    disconnectLabel: 'Disconnect Gmail',
   },
 ] as const;
 

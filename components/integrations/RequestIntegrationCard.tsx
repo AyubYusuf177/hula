@@ -42,7 +42,6 @@ export function RequestIntegrationCard({ onPress }: { onPress?: () => void }) {
 
 const styles = StyleSheet.create({
   card: {
-    marginTop: hula.spacing.xl,
     paddingVertical: hula.spacing.lg,
     paddingHorizontal: hula.spacing.lg,
     borderRadius: hula.radius.tile,

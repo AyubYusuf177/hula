@@ -4,17 +4,26 @@ import { Image } from 'expo-image';
 import { useEffect, useRef } from 'react';
 import {
   ActivityIndicator,
-  Animated,
+  Alert,
   Dimensions,
-  Easing,
   Modal,
-  PanResponder,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+// No custom `easing` is passed to withTiming: in Expo Go a JS easing fn isn't a
+// worklet and crashes on the UI thread, so we use withTiming's default easing.
+import Animated, {
+  Extrapolation,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { hula } from '@/constants/theme';
@@ -26,16 +35,24 @@ const SCREEN_H = Dimensions.get('window').height;
 
 /** Drag distance / velocity past which a downward swipe dismisses the sheet. */
 const DISMISS_DISTANCE = 120;
-const DISMISS_VELOCITY = 0.55;
+const DISMISS_VELOCITY = 800;
 
 /**
- * Polished, dismissible bottom-sheet for one integration (Section 13).
+ * Simplified integration details sheet (Integrations V2).
  *
- * Everything scrolls (small iPhones reach every field + button), the footer
- * actions stay reachable above the home indicator, and the sheet can be dismissed
- * three ways: the X button, a backdrop tap, or a swipe-down on the drag handle.
- * Copy is honest and READ-ONLY, and CONNECTED copy comes only from backend truth.
- * Styling is Hula's dark/glassy system (not Miora's).
+ * Deliberately SHORT so it always fits without scrolling — there is no
+ * ScrollView, so the swipe-down gesture never fights scroll and dismissal is
+ * reliable every time. The whole card is a drag zone; the X button and a
+ * backdrop tap also dismiss.
+ *
+ * Connected: icon → name → EMERALD "Connected" → honest read-only copy →
+ * connected account email → one Disconnect action (never red).
+ * Disconnected: desaturated icon → "Not connected" → copy → Connect button →
+ * a small OAuth disclosure.
+ *
+ * Connection state is EMERALD only (never red); a provider's brand colour lives
+ * only inside its product icon; CONNECTED copy comes only from backend truth, so
+ * there is no reconnect/disconnected flash.
  */
 export function IntegrationDetailsSheet({
   visible,
@@ -45,7 +62,6 @@ export function IntegrationDetailsSheet({
   onClose,
   onConnect,
   onDisconnect,
-  onRefresh,
 }: {
   visible: boolean;
   provider: IntegrationProviderConfig | null;
@@ -54,55 +70,58 @@ export function IntegrationDetailsSheet({
   onClose: () => void;
   onConnect: () => void;
   onDisconnect: () => void;
-  onRefresh: () => void;
 }) {
   const insets = useSafeAreaInsets();
-  const translateY = useRef(new Animated.Value(SCREEN_H)).current;
+  const translateY = useSharedValue(SCREEN_H);
 
-  const animateOpen = () =>
-    Animated.timing(translateY, {
-      toValue: 0,
-      duration: 320,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-
-  const animateClose = (then?: () => void) =>
-    Animated.timing(translateY, {
-      toValue: SCREEN_H,
-      duration: 240,
-      easing: Easing.in(Easing.cubic),
-      useNativeDriver: true,
-    }).start(() => then?.());
+  // Keep the latest onClose so the worklet's runOnJS never fires a stale one.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
-    if (visible) animateOpen();
-    else translateY.setValue(SCREEN_H);
+    if (visible) {
+      translateY.value = SCREEN_H;
+      translateY.value = withSpring(0, { damping: 24, stiffness: 220, mass: 0.9 });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  // Swipe-down on the drag handle / header. The inner ScrollView owns body
-  // scrolling, so the two never fight: the sheet only follows drags that start on
-  // the handle region.
-  const pan = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_e, g) => g.dy > 4 && Math.abs(g.dy) > Math.abs(g.dx),
-      onPanResponderMove: (_e, g) => {
-        if (g.dy > 0) translateY.setValue(g.dy);
+  const dismiss = () => {
+    translateY.value = withTiming(
+      SCREEN_H,
+      { duration: 240 },
+      (finished) => {
+        if (finished) runOnJS(onCloseRef.current)();
       },
-      onPanResponderRelease: (_e, g) => {
-        if (g.dy > DISMISS_DISTANCE || g.vy > DISMISS_VELOCITY) {
-          animateClose(onClose);
-        } else {
-          Animated.spring(translateY, {
-            toValue: 0,
-            useNativeDriver: true,
-            bounciness: 4,
-          }).start();
-        }
-      },
-    }),
-  ).current;
+    );
+  };
+
+  const settle = () => {
+    translateY.value = withSpring(0, { damping: 24, stiffness: 220, mass: 0.9 });
+  };
+
+  // The whole sheet is one drag zone — no scroll lives inside it, so the gesture
+  // never competes with a ScrollView. That's what makes dismissal reliable.
+  const pan = Gesture.Pan()
+    .activeOffsetY(8)
+    .failOffsetX([-24, 24])
+    .onUpdate((e) => {
+      if (e.translationY > 0) translateY.value = e.translationY;
+    })
+    .onEnd((e) => {
+      if (e.translationY > DISMISS_DISTANCE || e.velocityY > DISMISS_VELOCITY) {
+        runOnJS(dismiss)();
+      } else {
+        runOnJS(settle)();
+      }
+    });
+
+  const backdropStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(translateY.value, [0, SCREEN_H], [1, 0], Extrapolation.CLAMP),
+  }));
+  const sheetStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+  }));
 
   if (!provider) return null;
 
@@ -110,160 +129,134 @@ export function IntegrationDetailsSheet({
   const busy = view.state === 'connecting';
   const copy = deriveSheetCopy(view, provider);
 
-  const requestClose = () => animateClose(onClose);
-
-  // Backdrop fades with the sheet position.
-  const backdropOpacity = translateY.interpolate({
-    inputRange: [0, SCREEN_H],
-    outputRange: [1, 0],
-    extrapolate: 'clamp',
-  });
+  const confirmDisconnect = () => {
+    Alert.alert(
+      provider.disconnectLabel,
+      `Hula will stop reading your ${provider.displayName}. You can reconnect anytime.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Disconnect', style: 'destructive', onPress: onDisconnect },
+      ],
+    );
+  };
 
   return (
-    <Modal visible={visible} transparent animationType="none" onRequestClose={requestClose}>
+    <Modal visible={visible} transparent animationType="none" onRequestClose={dismiss}>
       <View style={styles.overlay}>
-        <Animated.View style={[StyleSheet.absoluteFill, { opacity: backdropOpacity }]}>
+        <Animated.View style={[StyleSheet.absoluteFill, backdropStyle]}>
           <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
-          <Pressable style={styles.backdropTint} onPress={requestClose} accessibilityLabel="Close" />
+          <Pressable
+            style={styles.backdropTint}
+            onPress={dismiss}
+            accessibilityLabel="Close"
+          />
         </Animated.View>
 
-        <Animated.View
-          style={[styles.sheetWrap, { transform: [{ translateY }] }]}
-        >
-          <View style={styles.sheet}>
-            {/* Drag zone: handle + header (swipe down here to dismiss) */}
-            <View {...pan.panHandlers}>
-              <View style={styles.handle} />
-              <View style={styles.header}>
+        <Animated.View style={[styles.sheetWrap, sheetStyle]}>
+          <GestureDetector gesture={pan}>
+            <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, hula.spacing.lg) }]}>
+              <View style={styles.handleHitbox}>
+                <View style={styles.handle} />
+              </View>
+
+              <View style={styles.headerRow}>
                 <Pressable
-                  onPress={requestClose}
+                  onPress={dismiss}
                   hitSlop={10}
                   style={({ pressed }) => [styles.closeBtn, pressed && styles.pressed]}
                   accessibilityLabel="Close"
                 >
                   <Ionicons name="close" size={22} color={hula.colors.text.primary} />
                 </Pressable>
-                <Text style={styles.headerTitle} numberOfLines={1}>
-                  {provider.displayName}
-                </Text>
-                <View style={styles.headerSpacer} />
-              </View>
-            </View>
-
-            <ScrollView
-              contentContainerStyle={styles.body}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.bigIcon}>
-                <Image
-                  source={provider.iconImage}
-                  style={styles.bigIconImg}
-                  contentFit="contain"
-                  accessibilityLabel={provider.displayName}
-                />
               </View>
 
-              <Text style={styles.heading}>{copy.heading}</Text>
+              <View style={styles.identity}>
+                <View style={[styles.bigIcon, !connected && styles.bigIconMuted]}>
+                  <Image
+                    source={provider.iconImage}
+                    style={[styles.bigIconImg, !connected && styles.bigIconImgDim]}
+                    contentFit="contain"
+                    accessibilityLabel={provider.displayName}
+                  />
+                </View>
 
-              {/* Live status chip (backend truth) */}
-              <View style={styles.statusChip}>
-                <View
-                  style={[
-                    styles.statusDot,
-                    { backgroundColor: connected ? provider.accent : hula.colors.text.faint },
-                  ]}
-                />
-                <Text style={styles.statusChipText}>{view.statusLabel}</Text>
+                <Text style={styles.heading}>{copy.heading}</Text>
+
+                <View style={styles.statusRow}>
+                  {connected ? (
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={16}
+                      color={hula.status.success}
+                    />
+                  ) : (
+                    <View style={styles.statusDot} />
+                  )}
+                  <Text
+                    style={[styles.statusText, connected && styles.statusTextConnected]}
+                  >
+                    {connected ? 'Connected' : 'Not connected'}
+                  </Text>
+                </View>
+
+                <Text style={styles.paragraph}>{copy.body}</Text>
               </View>
+
               {connected && view.accountLabel ? (
-                <Text style={styles.account}>{view.accountLabel}</Text>
-              ) : null}
-
-              <Text style={styles.paragraph}>{copy.body}</Text>
-
-              {/* Capabilities available today (read-only) */}
-              <View style={styles.list}>
-                {provider.capabilities.map((cap) => (
-                  <View key={cap} style={styles.listRow}>
-                    <Ionicons name="checkmark-circle" size={18} color={provider.accent} />
-                    <Text style={styles.listText}>{cap}</Text>
-                  </View>
-                ))}
-              </View>
-
-              {/* Coming later (clearly not enabled yet) */}
-              {provider.comingLater.length > 0 ? (
-                <View style={styles.laterBlock}>
-                  <Text style={styles.laterLabel}>COMING LATER</Text>
-                  {provider.comingLater.map((cap) => (
-                    <View key={cap} style={styles.listRow}>
-                      <Ionicons name="ellipse-outline" size={16} color={hula.colors.text.faint} />
-                      <Text style={styles.laterText}>{cap}</Text>
-                    </View>
-                  ))}
+                <View style={styles.accountCard}>
+                  <Text style={styles.accountLabel}>Connected account</Text>
+                  <Text style={styles.accountEmail} numberOfLines={1}>
+                    {view.accountLabel}
+                  </Text>
                 </View>
               ) : null}
 
-              {/* Honest limitation */}
-              <View style={styles.noteRow}>
-                <Ionicons name="information-circle-outline" size={16} color={hula.colors.text.tertiary} />
-                <Text style={styles.note}>{provider.limitation}</Text>
-              </View>
-
-              {/* Privacy note */}
-              <View style={styles.noteRow}>
-                <Ionicons name="lock-closed" size={14} color={hula.colors.text.tertiary} />
-                <Text style={styles.note}>{provider.privacyNote}</Text>
-              </View>
-
               {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
-            </ScrollView>
 
-            {/* Sticky action footer — always reachable above the home indicator */}
-            <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, hula.spacing.md) }]}>
-              {connected ? (
-                <Pressable
-                  onPress={onDisconnect}
-                  disabled={busy}
-                  style={({ pressed }) => [styles.disconnectBtn, pressed && styles.pressed]}
-                >
-                  {busy ? (
-                    <ActivityIndicator color="#F0A868" />
-                  ) : (
-                    <>
-                      <Ionicons name="unlink-outline" size={18} color="#F0A868" />
-                      <Text style={styles.disconnectText}>{provider.disconnectLabel}</Text>
-                    </>
-                  )}
-                </Pressable>
-              ) : (
-                <Pressable
-                  onPress={onConnect}
-                  disabled={busy}
-                  style={({ pressed }) => [styles.connectBtn, pressed && styles.pressed]}
-                >
-                  {busy ? (
-                    <ActivityIndicator color={hula.button.solidText} />
-                  ) : (
-                    <>
-                      <Ionicons name="link-outline" size={18} color={hula.button.solidText} />
-                      <Text style={styles.connectText}>{provider.connectLabel}</Text>
-                    </>
-                  )}
-                </Pressable>
-              )}
-
-              <Pressable
-                onPress={onRefresh}
-                disabled={busy}
-                hitSlop={8}
-                style={({ pressed }) => [styles.refreshBtn, pressed && styles.pressed]}
-              >
-                <Ionicons name="refresh" size={15} color={hula.colors.text.secondary} />
-                <Text style={styles.refreshText}>Refresh connection status</Text>
-              </Pressable>
+              <View style={styles.footer}>
+                {connected ? (
+                  <Pressable
+                    onPress={confirmDisconnect}
+                    disabled={busy}
+                    style={({ pressed }) => [styles.disconnectBtn, pressed && styles.pressed]}
+                  >
+                    {busy ? (
+                      <ActivityIndicator color={hula.colors.text.primary} />
+                    ) : (
+                      <Text style={styles.disconnectText}>Disconnect</Text>
+                    )}
+                  </Pressable>
+                ) : (
+                  <>
+                    <Pressable
+                      onPress={onConnect}
+                      disabled={busy}
+                      style={({ pressed }) => [styles.connectBtn, pressed && styles.pressed]}
+                    >
+                      {busy ? (
+                        <ActivityIndicator color={hula.button.solidText} />
+                      ) : (
+                        <>
+                          <Ionicons name="logo-google" size={18} color={hula.button.solidText} />
+                          <Text style={styles.connectText}>{provider.connectLabel}</Text>
+                        </>
+                      )}
+                    </Pressable>
+                    <View style={styles.redirectNote}>
+                      <Ionicons
+                        name="lock-closed"
+                        size={13}
+                        color={hula.colors.text.tertiary}
+                      />
+                      <Text style={styles.redirectText}>
+                        You’ll be redirected to Google to authorize access.
+                      </Text>
+                    </View>
+                  </>
+                )}
+              </View>
             </View>
-          </View>
+          </GestureDetector>
         </Animated.View>
       </View>
     </Modal>
@@ -280,10 +273,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(2,3,10,0.55)',
   },
   sheetWrap: {
-    maxHeight: '90%',
+    // Content is short by design; this cap only guards very small screens.
+    maxHeight: '88%',
   },
   sheet: {
-    maxHeight: '100%',
     backgroundColor: '#0C1022',
     borderTopLeftRadius: hula.radius.card,
     borderTopRightRadius: hula.radius.card,
@@ -292,19 +285,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: hula.spacing.xl,
     paddingTop: hula.spacing.sm,
   },
+  handleHitbox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: hula.spacing.xs,
+    paddingBottom: hula.spacing.sm,
+  },
   handle: {
-    alignSelf: 'center',
     width: 44,
     height: 5,
     borderRadius: 3,
     backgroundColor: 'rgba(150,160,210,0.45)',
-    marginBottom: hula.spacing.md,
   },
-  header: {
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: hula.spacing.sm,
   },
   closeBtn: {
     width: 40,
@@ -316,32 +311,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerTitle: {
-    flex: 1,
-    textAlign: 'center',
-    fontFamily: font.bold,
-    fontSize: 20,
-    color: hula.colors.text.primary,
-  },
-  headerSpacer: {
-    width: 40,
-    height: 40,
-  },
-  body: {
+  identity: {
     alignItems: 'center',
-    paddingTop: hula.spacing.md,
-    paddingBottom: hula.spacing.lg,
+    paddingTop: hula.spacing.sm,
   },
   bigIcon: {
-    width: 76,
-    height: 76,
+    width: 84,
+    height: 84,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(150,160,210,0.16)',
     marginBottom: hula.spacing.md,
   },
+  bigIconMuted: {
+    backgroundColor: 'rgba(150, 160, 210, 0.05)',
+    borderColor: 'rgba(150, 160, 210, 0.12)',
+  },
   bigIconImg: {
-    width: 76,
-    height: 76,
+    width: 52,
+    height: 52,
+  },
+  bigIconImgDim: {
+    opacity: 0.4,
   },
   heading: {
     fontFamily: font.bold,
@@ -349,89 +343,53 @@ const styles = StyleSheet.create({
     color: hula.colors.text.primary,
     textAlign: 'center',
   },
-  statusChip: {
+  statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: hula.spacing.md,
-    paddingHorizontal: hula.spacing.md,
-    paddingVertical: 5,
-    borderRadius: hula.radius.pill,
-    backgroundColor: hula.glass.tile,
-    borderWidth: 1,
-    borderColor: hula.glass.tileBorder,
+    marginTop: 6,
   },
   statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: hula.colors.text.faint,
   },
-  statusChipText: {
+  statusText: {
     fontFamily: font.medium,
-    fontSize: 13,
-    color: hula.colors.text.secondary,
-  },
-  account: {
-    marginTop: 6,
-    fontFamily: font.regular,
-    fontSize: 13,
+    fontSize: 14,
     color: hula.colors.text.tertiary,
+  },
+  statusTextConnected: {
+    color: hula.status.success,
   },
   paragraph: {
     marginTop: hula.spacing.md,
     fontFamily: font.regular,
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 14.5,
+    lineHeight: 21,
     color: hula.colors.text.secondary,
     textAlign: 'center',
   },
-  list: {
-    alignSelf: 'stretch',
+  accountCard: {
     marginTop: hula.spacing.xl,
-    gap: hula.spacing.md,
+    paddingVertical: hula.spacing.md,
+    paddingHorizontal: hula.spacing.lg,
+    borderRadius: hula.radius.tile,
+    backgroundColor: hula.glass.tile,
+    borderWidth: 1,
+    borderColor: hula.glass.tileBorder,
   },
-  listRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: hula.spacing.md,
+  accountLabel: {
+    fontFamily: font.regular,
+    fontSize: 12,
+    color: hula.colors.text.tertiary,
   },
-  listText: {
-    flex: 1,
+  accountEmail: {
+    marginTop: 2,
     fontFamily: font.medium,
     fontSize: 15,
     color: hula.colors.text.primary,
-  },
-  laterBlock: {
-    alignSelf: 'stretch',
-    marginTop: hula.spacing.xl,
-    gap: hula.spacing.sm,
-  },
-  laterLabel: {
-    fontFamily: font.semiBold,
-    fontSize: 11,
-    letterSpacing: 1.5,
-    color: hula.colors.text.faint,
-    marginBottom: 2,
-  },
-  laterText: {
-    flex: 1,
-    fontFamily: font.regular,
-    fontSize: 14,
-    color: hula.colors.text.tertiary,
-  },
-  noteRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: hula.spacing.sm,
-    alignSelf: 'stretch',
-    marginTop: hula.spacing.md,
-  },
-  note: {
-    flex: 1,
-    fontFamily: font.regular,
-    fontSize: 13,
-    lineHeight: 19,
-    color: hula.colors.text.tertiary,
   },
   error: {
     alignSelf: 'stretch',
@@ -439,14 +397,12 @@ const styles = StyleSheet.create({
     fontFamily: font.medium,
     fontSize: 13,
     lineHeight: 19,
-    color: '#F0A868',
+    color: hula.status.attention,
     textAlign: 'center',
   },
   footer: {
-    paddingTop: hula.spacing.md,
-    gap: hula.spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(150,160,210,0.10)',
+    marginTop: hula.spacing.xl,
+    gap: hula.spacing.md,
   },
   connectBtn: {
     flexDirection: 'row',
@@ -462,32 +418,30 @@ const styles = StyleSheet.create({
     fontSize: hula.typography.button.fontSize,
     color: hula.button.solidText,
   },
-  disconnectBtn: {
+  redirectNote: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: hula.spacing.sm,
+    gap: 6,
+  },
+  redirectText: {
+    fontFamily: font.regular,
+    fontSize: 12.5,
+    color: hula.colors.text.tertiary,
+  },
+  // Neutral, never red — the design system forbids red in connected states.
+  disconnectBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
     height: hula.button.height,
     borderRadius: hula.button.radius,
-    backgroundColor: 'rgba(240,168,104,0.10)',
+    backgroundColor: 'rgba(150,160,210,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(240,168,104,0.45)',
+    borderColor: 'rgba(150,160,210,0.22)',
   },
   disconnectText: {
     fontFamily: font.semiBold,
     fontSize: hula.typography.button.fontSize,
-    color: '#F0A868',
-  },
-  refreshBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: hula.spacing.sm,
-    paddingVertical: hula.spacing.sm,
-  },
-  refreshText: {
-    fontFamily: font.medium,
-    fontSize: 14,
     color: hula.colors.text.secondary,
   },
   pressed: {

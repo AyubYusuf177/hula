@@ -191,7 +191,7 @@ export interface IntegrationCatalogEntry {
   provider: string;
   displayName: string;
   category: string;
-  status: 'planned' | 'available_stub';
+  status: 'planned' | 'available_stub' | 'available_readonly';
   authType: 'oauth2' | 'api_key' | 'partner' | 'none';
   defaultScopes: string[];
   capabilities: string[];
@@ -203,7 +203,7 @@ export interface IntegrationStatus {
   provider: string;
   displayName: string;
   category: string;
-  catalogStatus: 'planned' | 'available_stub';
+  catalogStatus: 'planned' | 'available_stub' | 'available_readonly';
   authType: 'oauth2' | 'api_key' | 'partner' | 'none';
   connectionStatus: 'disconnected' | 'connected' | 'expired' | 'revoked' | 'error';
   connected: boolean;
@@ -483,4 +483,137 @@ export async function fetchGoogleCalendarEvents(
   }
 
   return (await res.json()) as GoogleCalendarEventsResponse;
+}
+
+// --- Gmail (Section 14) ----------------------------------------------------
+//
+// A SEPARATE read-only integration from Google Calendar. The app only ever
+// handles the backend's SAFE status shape, an authorization URL, and normalized
+// message METADATA — Gmail tokens stay encrypted server-side and never touch the
+// app, and there is no send/draft path anywhere.
+
+/** Stable provider slug for Gmail (matches the backend catalog). */
+export const GMAIL_PROVIDER = 'gmail';
+
+/**
+ * Raised when the backend can't start the Gmail OAuth flow because its Gmail
+ * OAuth env is not configured (a safe 400, not a crash).
+ */
+export class GmailNotConfiguredError extends Error {
+  constructor() {
+    super('Gmail connect is not configured on the Hula backend yet.');
+    this.name = 'GmailNotConfiguredError';
+  }
+}
+
+/** Response of `POST /v1/me/integrations/gmail/connect`. */
+export interface GmailConnectResponse {
+  provider: string;
+  /** The Google consent URL to open in the system browser. */
+  authorizationUrl: string;
+  /** ISO timestamp after which the pending OAuth state expires. */
+  expiresAt: string;
+}
+
+/**
+ * Start the Gmail OAuth flow. Returns ONLY an authorization URL (plus safe
+ * metadata) — never a token. The caller opens `authorizationUrl` in the system
+ * browser; Google redirects back to the backend Gmail callback, which stores the
+ * encrypted tokens. The app then re-reads status to learn the result.
+ */
+export async function connectGmail(
+  token: string,
+  params: { appReturnUrl?: string } = {},
+): Promise<GmailConnectResponse> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(
+    `${BASE_URL}/v1/me/integrations/${GMAIL_PROVIDER}/connect`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(
+        params.appReturnUrl ? { appReturnUrl: params.appReturnUrl } : {},
+      ),
+    },
+  );
+
+  if (res.status === 400) {
+    // Backend returns `{ error: "gmail_not_configured" }` here.
+    throw new GmailNotConfiguredError();
+  }
+  if (!res.ok) {
+    throw new Error(`gmail/connect failed (${res.status})`);
+  }
+
+  const data = (await res.json()) as Partial<GmailConnectResponse>;
+  if (typeof data.authorizationUrl !== 'string' || data.authorizationUrl.length === 0) {
+    throw new Error('gmail/connect returned no authorization URL');
+  }
+  return data as GmailConnectResponse;
+}
+
+/** Fetch the signed-in user's Gmail connection status (backend is the truth). */
+export async function fetchGmailStatus(token: string): Promise<IntegrationStatus> {
+  return fetchIntegrationStatus(token, GMAIL_PROVIDER);
+}
+
+/** Disconnect Gmail for the signed-in user (idempotent). */
+export async function disconnectGmail(
+  token: string,
+): Promise<{ ok: boolean; changed: boolean }> {
+  return disconnectIntegration(token, GMAIL_PROVIDER);
+}
+
+/** A single safe, normalized Gmail message (metadata + snippet only, no body). */
+export interface GmailMessage {
+  id: string;
+  threadId: string;
+  fromName: string | null;
+  fromAddress: string | null;
+  subject: string | null;
+  receivedAt: string | null;
+  unread: boolean;
+  important: boolean;
+  labels: string[];
+  snippet: string | null;
+  source: string;
+}
+
+/** Response of `GET /v1/me/integrations/gmail/messages`. */
+export interface GmailMessagesResponse {
+  provider: string;
+  messages: GmailMessage[];
+}
+
+/**
+ * Read the user's recent Gmail inbox messages (READ-ONLY). Returns the backend's
+ * already-normalized, credential-free metadata + snippets. The primary Gmail
+ * experience is via iMessage; this exists so the app can preview safely.
+ */
+export async function fetchGmailMessages(
+  token: string,
+  params: { limit?: number } = {},
+): Promise<GmailMessagesResponse> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set('limit', String(params.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+
+  const res = await fetch(
+    `${BASE_URL}/v1/me/integrations/${GMAIL_PROVIDER}/messages${suffix}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+
+  if (!res.ok) {
+    throw new Error(`gmail/messages request failed (${res.status})`);
+  }
+
+  return (await res.json()) as GmailMessagesResponse;
 }

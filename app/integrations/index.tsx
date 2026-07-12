@@ -6,6 +6,12 @@ import { StatusBar } from 'expo-status-bar';
 import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
@@ -19,15 +25,20 @@ import { hula } from '@/constants/theme';
 import {
   getIntegrationProvider,
   INTEGRATION_PROVIDERS,
-  integrationsByCategory,
 } from '@/data/integrations';
 import {
+  connectGmail,
   connectGoogleCalendar,
+  disconnectGmail,
   disconnectGoogleCalendar,
   fetchUserIntegrations,
+  GMAIL_PROVIDER,
+  GmailNotConfiguredError,
   GOOGLE_CALENDAR_PROVIDER,
   GoogleCalendarNotConfiguredError,
   MissingApiUrlError,
+  type GmailConnectResponse,
+  type GoogleCalendarConnectResponse,
   type IntegrationStatus,
 } from '@/lib/hulaApi';
 import {
@@ -37,6 +48,11 @@ import {
   shouldStartRequest,
   type IntegrationView,
 } from '@/lib/integrationStatus';
+import {
+  getMemoryStatuses,
+  markProviderDisconnected,
+} from '@/lib/integrationStatusCache';
+import { loadCachedStatuses, persistStatuses } from '@/lib/integrationStatusStore';
 
 // Lets a returning auth session dismiss cleanly where the platform supports it.
 WebBrowser.maybeCompleteAuthSession();
@@ -47,6 +63,15 @@ const font = hula.typography.fontFamily;
 const PROVIDER_IDS = new Set(INTEGRATION_PROVIDERS.map((p) => p.id));
 
 type StatusMap = Record<string, IntegrationStatus | null>;
+
+/** Build the screen's StatusMap from a backend/cache status list. */
+function toStatusMap(list: IntegrationStatus[]): StatusMap {
+  const next: StatusMap = {};
+  for (const item of list) {
+    if (PROVIDER_IDS.has(item.provider)) next[item.provider] = item;
+  }
+  return next;
+}
 
 /**
  * Integrations screen (Section 13).
@@ -63,14 +88,27 @@ type StatusMap = Record<string, IntegrationStatus | null>;
  */
 export default function IntegrationsScreen() {
   const router = useRouter();
-  const { getToken } = useAuth();
+  const { getToken, userId } = useAuth();
 
-  const [statuses, setStatuses] = useState<StatusMap>({});
+  // Seed synchronously from the shared in-memory cache (warmed by Home's prefetch
+  // or a previous visit this session) so returning renders instantly, scoped to
+  // the current Clerk user. Null when nothing is cached for THIS user yet.
+  const initialCached = getMemoryStatuses(userId);
+  const [statuses, setStatuses] = useState<StatusMap>(() =>
+    initialCached ? toStatusMap(initialCached) : {},
+  );
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string | null>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Gates the final cards behind the first KNOWN status (cache OR backend) so a
+  // user NEVER sees a disconnected/connect-button flash before truth arrives.
+  // Cache-first: if we already have last-known truth in memory, skip the skeleton.
+  const [hydrated, setHydrated] = useState(initialCached != null);
 
   const mounted = useRef(true);
+  // Keep the latest userId for the (dep-free) refresh/persist paths.
+  const userIdRef = useRef(userId);
+  userIdRef.current = userId;
   // Keep the latest getToken without making refresh depend on its identity (Clerk
   // can hand back a new function each render, which is what caused the old loop).
   const getTokenRef = useRef(getToken);
@@ -84,6 +122,24 @@ export default function IntegrationsScreen() {
       mounted.current = false;
     };
   }, []);
+
+  // Cache-first: if nothing was seeded from memory, try the user-scoped disk
+  // cache while the background refresh runs. Only applied if a network result
+  // hasn't already landed, and never shown before Clerk resolves the user id.
+  useEffect(() => {
+    if (!userId || hydrated) return;
+    let active = true;
+    loadCachedStatuses(userId).then((cached) => {
+      if (!active || !cached || !mounted.current) return;
+      // A newer network read may have won the race — don't clobber it.
+      setStatuses((prev) => (Object.keys(prev).length > 0 ? prev : toStatusMap(cached)));
+      setHydrated(true);
+    });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   /**
    * Re-read backend truth for every configured provider. Stable identity (no deps)
@@ -106,17 +162,20 @@ export default function IntegrationsScreen() {
       // Ignore a response that a newer request has already superseded.
       if (isStaleResponse(requestId, coord.current.latestId)) return;
 
-      const next: StatusMap = {};
-      for (const item of all) {
-        if (PROVIDER_IDS.has(item.provider)) next[item.provider] = item;
-      }
-      setStatuses(next);
+      setStatuses(toStatusMap(all));
+      // Cache the fresh truth so the next open (this session or the next) renders
+      // instantly. Only ever written after a SUCCESSFUL read — a failure below
+      // never touches the cache, so cards stay in their last known-good state.
+      void persistStatuses(userIdRef.current, all);
     } catch (err) {
       // A status read failure leaves cards in their last known state rather than
       // flipping them to "connected"; the sheet's own actions surface errors.
       if (__DEV__) console.warn('[Integrations] status refresh failed:', err);
     } finally {
       coord.current.inFlight = false;
+      // The first settled read (success OR failure) unblocks rendering; we never
+      // hang on the skeleton, and subsequent refreshes never re-show it.
+      if (mounted.current) setHydrated(true);
     }
   }, []);
 
@@ -147,13 +206,16 @@ export default function IntegrationsScreen() {
     [statuses, connectingId, errors],
   );
 
-  // Connected provider configs drive the hero orbit (backend truth only).
+  // Split providers by backend truth so each lands in its section. Only
+  // meaningful once hydrated — before that we render a skeleton, never these.
   const connectedProviders = useMemo(
     () => INTEGRATION_PROVIDERS.filter((p) => statuses[p.id]?.connected),
     [statuses],
   );
-
-  const categories = useMemo(() => integrationsByCategory(), []);
+  const availableProviders = useMemo(
+    () => INTEGRATION_PROVIDERS.filter((p) => !statuses[p.id]?.connected),
+    [statuses],
+  );
 
   const openSheet = (providerId: string) => {
     setErrors((prev) => ({ ...prev, [providerId]: null }));
@@ -168,17 +230,22 @@ export default function IntegrationsScreen() {
       const token = await getTokenRef.current();
       if (!token) throw new Error('Not signed in');
 
-      // Only Google Calendar has a real OAuth flow in this section.
-      if (providerId !== GOOGLE_CALENDAR_PROVIDER) {
+      // Google Calendar and Gmail each have their own real OAuth flow.
+      if (
+        providerId !== GOOGLE_CALENDAR_PROVIDER &&
+        providerId !== GMAIL_PROVIDER
+      ) {
         throw new Error('This integration isn’t available yet.');
       }
 
       // A deep link back into this screen so the backend callback can bounce the
       // user straight home. Google still redirects to the backend callback first.
       const returnUrl = Linking.createURL('/integrations');
-      const { authorizationUrl } = await connectGoogleCalendar(token, {
-        appReturnUrl: returnUrl,
-      });
+      const connectResult: GoogleCalendarConnectResponse | GmailConnectResponse =
+        providerId === GMAIL_PROVIDER
+          ? await connectGmail(token, { appReturnUrl: returnUrl })
+          : await connectGoogleCalendar(token, { appReturnUrl: returnUrl });
+      const { authorizationUrl } = connectResult;
 
       // Prefer the auth session (auto-dismisses on the return-URL scheme); fall
       // back to a plain system-browser open if it isn't available. Never a WebView.
@@ -190,11 +257,12 @@ export default function IntegrationsScreen() {
     } catch (err) {
       if (__DEV__) console.warn('[Integrations] connect failed:', err);
       const message =
-        err instanceof GoogleCalendarNotConfiguredError
-          ? 'Google Calendar connect isn’t available yet. Please try again later.'
+        err instanceof GoogleCalendarNotConfiguredError ||
+        err instanceof GmailNotConfiguredError
+          ? 'This connection isn’t available yet. Please try again later.'
           : err instanceof MissingApiUrlError
             ? 'Hula backend URL is not configured.'
-            : 'Couldn’t start the Google connection. Please try again.';
+            : 'Couldn’t start the connection. Please try again.';
       if (mounted.current) setErrors((prev) => ({ ...prev, [providerId]: message }));
     } finally {
       if (mounted.current) setConnectingId(null);
@@ -212,6 +280,22 @@ export default function IntegrationsScreen() {
       if (!token) throw new Error('Not signed in');
       if (providerId === GOOGLE_CALENDAR_PROVIDER) {
         await disconnectGoogleCalendar(token);
+      } else if (providerId === GMAIL_PROVIDER) {
+        await disconnectGmail(token);
+      }
+      // Optimistically flip ONLY this provider in state + cache so the change is
+      // instant; the refresh below still confirms backend truth. Other providers
+      // are left untouched.
+      if (mounted.current) {
+        setStatuses((prev) => {
+          const current = prev[providerId];
+          if (!current) return prev;
+          return { ...prev, [providerId]: { ...current, connectionStatus: 'disconnected', connected: false, providerAccountEmail: null, connectedAt: null } };
+        });
+      }
+      const cached = getMemoryStatuses(userIdRef.current);
+      if (cached) {
+        void persistStatuses(userIdRef.current, markProviderDisconnected(cached, providerId));
       }
     } catch (err) {
       if (__DEV__) console.warn('[Integrations] disconnect failed:', err);
@@ -234,7 +318,7 @@ export default function IntegrationsScreen() {
       <StatusBar style="light" />
       <AmbientGlow />
 
-      {/* Header */}
+      {/* Header: back only — the title lives in the scroll body, left-aligned. */}
       <View style={styles.header}>
         <Pressable
           onPress={() => router.back()}
@@ -244,32 +328,51 @@ export default function IntegrationsScreen() {
         >
           <Ionicons name="chevron-back" size={22} color={hula.colors.text.primary} />
         </Pressable>
-        <Text style={styles.headerTitle}>Integrations</Text>
-        <View style={styles.headerSpacer} />
       </View>
 
       <ScrollView
         contentContainerStyle={styles.body}
         showsVerticalScrollIndicator={false}
       >
-        <IntegrationHero connectedProviders={connectedProviders} />
+        <Text style={styles.title}>Integrations</Text>
+        <Text style={styles.subtitle}>Connect the apps Hula can work with.</Text>
 
-        {/* Categories render immediately from static data (no loading spinner →
-            no layout shift); status just decorates each card as it arrives. */}
-        {categories.map((group) => (
-          <IntegrationCategory key={group.category} label={group.label}>
-            {group.providers.map((provider) => (
-              <IntegrationCard
-                key={provider.id}
-                provider={provider}
-                view={viewFor(provider.id)}
-                onPress={() => openSheet(provider.id)}
-              />
-            ))}
-          </IntegrationCategory>
-        ))}
+        <View style={styles.heroWrap}>
+          <IntegrationHero />
+        </View>
 
-        <RequestIntegrationCard />
+        {/* Never render final cards until backend truth has arrived — a skeleton
+            holds the space so no disconnected state can flash. */}
+        {!hydrated ? (
+          <SkeletonSection />
+        ) : (
+          <>
+            {connectedProviders.length > 0 ? (
+              <IntegrationCategory label="Connected">
+                {connectedProviders.map((provider) => (
+                  <IntegrationCard
+                    key={provider.id}
+                    provider={provider}
+                    view={viewFor(provider.id)}
+                    onPress={() => openSheet(provider.id)}
+                  />
+                ))}
+              </IntegrationCategory>
+            ) : null}
+
+            <IntegrationCategory label="Available">
+              {availableProviders.map((provider) => (
+                <IntegrationCard
+                  key={provider.id}
+                  provider={provider}
+                  view={viewFor(provider.id)}
+                  onPress={() => openSheet(provider.id)}
+                />
+              ))}
+              <RequestIntegrationCard />
+            </IntegrationCategory>
+          </>
+        )}
       </ScrollView>
 
       <IntegrationDetailsSheet
@@ -280,9 +383,32 @@ export default function IntegrationsScreen() {
         onClose={() => setSelectedId(null)}
         onConnect={() => selectedId && onConnect(selectedId)}
         onDisconnect={() => selectedId && onDisconnect(selectedId)}
-        onRefresh={() => refreshStatuses(true)}
       />
     </SafeAreaView>
+  );
+}
+
+/** A pulsing skeleton that reserves the cards' space during the first load. */
+function SkeletonSection() {
+  const pulse = useSharedValue(0.5);
+  useEffect(() => {
+    pulse.value = withRepeat(withTiming(1, { duration: 900 }), -1, true);
+  }, [pulse]);
+  const pulseStyle = useAnimatedStyle(() => ({ opacity: pulse.value }));
+
+  return (
+    <View style={styles.skeletonSection}>
+      <Animated.View style={[styles.skeletonLabel, pulseStyle]} />
+      {[0, 1].map((i) => (
+        <Animated.View key={i} style={[styles.skeletonCard, pulseStyle]}>
+          <View style={styles.skeletonIcon} />
+          <View style={styles.skeletonTextCol}>
+            <View style={styles.skeletonLineWide} />
+            <View style={styles.skeletonLineNarrow} />
+          </View>
+        </Animated.View>
+      ))}
+    </View>
   );
 }
 
@@ -330,10 +456,9 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     paddingHorizontal: hula.spacing.xl,
     paddingTop: hula.spacing.sm,
-    paddingBottom: hula.spacing.md,
+    paddingBottom: hula.spacing.sm,
   },
   backBtn: {
     width: 40,
@@ -345,20 +470,69 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerTitle: {
-    flex: 1,
-    textAlign: 'center',
-    fontFamily: font.bold,
-    fontSize: 22,
-    color: hula.colors.text.primary,
-  },
-  headerSpacer: {
-    width: 40,
-    height: 40,
-  },
   body: {
     paddingHorizontal: hula.spacing.xl,
     paddingBottom: hula.spacing['3xl'],
+  },
+  title: {
+    marginTop: hula.spacing.sm,
+    fontFamily: font.bold,
+    fontSize: 34,
+    color: hula.colors.text.primary,
+  },
+  subtitle: {
+    marginTop: hula.spacing.xs,
+    fontFamily: font.regular,
+    fontSize: 15,
+    lineHeight: 21,
+    color: hula.colors.text.tertiary,
+  },
+  heroWrap: {
+    marginTop: hula.spacing.xl,
+  },
+  skeletonSection: {
+    marginTop: hula.spacing['2xl'],
+    gap: hula.spacing.md,
+  },
+  skeletonLabel: {
+    width: 96,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: 'rgba(150,160,210,0.14)',
+    marginBottom: hula.spacing.sm,
+  },
+  skeletonCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: hula.spacing.md,
+    paddingVertical: hula.spacing.lg,
+    paddingHorizontal: hula.spacing.lg,
+    borderRadius: hula.radius.tile,
+    backgroundColor: hula.glass.tile,
+    borderWidth: 1,
+    borderColor: hula.glass.tileBorder,
+  },
+  skeletonIcon: {
+    width: 54,
+    height: 54,
+    borderRadius: 16,
+    backgroundColor: 'rgba(150,160,210,0.12)',
+  },
+  skeletonTextCol: {
+    flex: 1,
+    gap: 8,
+  },
+  skeletonLineWide: {
+    width: '55%',
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: 'rgba(150,160,210,0.16)',
+  },
+  skeletonLineNarrow: {
+    width: '80%',
+    height: 11,
+    borderRadius: 6,
+    backgroundColor: 'rgba(150,160,210,0.10)',
   },
   pressed: {
     opacity: 0.6,

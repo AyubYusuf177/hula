@@ -4,6 +4,7 @@ import icon from '@/assets/images/icon.png';
 import splashIcon from '@/assets/images/splash-icon.png';
 import favicon from '@/assets/images/favicon.png';
 import googleCalendar from '@/assets/images/integrations/google-calendar.png';
+import gmail from '@/assets/images/integrations/gmail.png';
 
 export const images = {
   hulaLogo,
@@ -18,4 +19,5 @@ export const images = {
 /** Integration provider product icons, keyed by backend provider slug. */
 export const integrationIcons = {
   google_calendar: googleCalendar,
+  gmail,
 } as const;

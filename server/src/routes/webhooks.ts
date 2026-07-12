@@ -23,6 +23,7 @@ import { loadBrainContextForUser } from "../users/profile";
 import { buildMemoryContext, handleMemoryCommand } from "../users/memory";
 import { listConnectedProviderNames } from "../integrations/connections";
 import { handleCalendarQuestion } from "../integrations/providers/googleCalendar/calendarQuestion";
+import { handleGmailQuestion } from "../integrations/providers/gmail/gmailQuestion";
 import { handleActionConfirmation } from "../actions/confirmations";
 import { handleActionIntent } from "../actions/detect";
 import { handleReminderCommand } from "../reminders/reminders";
@@ -273,6 +274,23 @@ async function processInbound(message: InboundMessage): Promise<void> {
         ? await handleCalendarQuestion(userId, message.content.text)
         : { handled: false as const };
 
+    // Gmail questions ("do I have any important emails", "what are my latest
+    // emails", "any unread emails") are answered read-only from the user's
+    // connected Gmail (Section 14). Handled after the calendar read and before
+    // the brain, and only when nothing earlier already replied. A supported Gmail
+    // question never falls through to the model; if Gmail isn't connected this
+    // replies honestly. Gmail and Calendar are independent — neither's connection
+    // state affects the other.
+    const gmail =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply) &&
+      !(actionIntent.handled && actionIntent.reply) &&
+      !(calendar.handled && calendar.reply)
+        ? await handleGmailQuestion(userId, message.content.text)
+        : { handled: false as const };
+
     if (memory.handled && memory.reply) {
       replyText = memory.reply;
       logger.info("sendblue.webhook memory command", {
@@ -302,6 +320,12 @@ async function processInbound(message: InboundMessage): Promise<void> {
       logger.info("sendblue.webhook calendar question", {
         sender: maskHandle(to),
         intent: calendar.intent,
+      });
+    } else if (gmail.handled && gmail.reply) {
+      replyText = gmail.reply;
+      logger.info("sendblue.webhook gmail question", {
+        sender: maskHandle(to),
+        intent: gmail.intent,
       });
     } else {
       const brain = await generateBrainReply(message, conversationId, userId);

@@ -57,6 +57,22 @@ export const hula = {
     blurIntensity: 24,
   },
 
+  /* ── Status treatments (connection state) ─────────────────────
+     A restrained, enterprise-grade success treatment (soft emerald —
+     never red) plus a warm amber for "needs attention". Used by the
+     integration cards + details sheet so connection state reads
+     premium and consistent, independent of a provider's brand color. */
+  status: {
+    success: '#4BD6A6', // soft emerald "Connected" text / icon
+    successDot: '#3FD0A8',
+    successBg: 'rgba(63, 208, 168, 0.12)',
+    successBorder: 'rgba(63, 208, 168, 0.32)',
+    successGlow: 'rgba(63, 208, 168, 0.22)',
+    attention: '#F0A868', // amber: expired / retry
+    attentionBg: 'rgba(240, 168, 104, 0.10)',
+    attentionBorder: 'rgba(240, 168, 104, 0.42)',
+  },
+
   /* ── Buttons ──────────────────────────────────────────────── */
   button: {
     height: 60,

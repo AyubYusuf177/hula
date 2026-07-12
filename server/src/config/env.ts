@@ -61,6 +61,15 @@ const envSchema = z.object({
   GOOGLE_OAUTH_REDIRECT_URI: z.string().optional(),
   GOOGLE_CALENDAR_SCOPES: z.string().optional(),
 
+  // Gmail OAuth (Section 14) — all OPTIONAL. Gmail is a SEPARATE provider from
+  // Google Calendar: it reuses the shared Google client id/secret but has its
+  // OWN redirect URI (GMAIL_OAUTH_REDIRECT_URI) and its own least-privilege
+  // READ-ONLY scope (gmail.readonly, overridable via GMAIL_SCOPES). Required only
+  // when a user actually starts the Gmail connect flow; a missing value surfaces
+  // as a safe configuration error at connect time, never a startup crash.
+  GMAIL_OAUTH_REDIRECT_URI: z.string().optional(),
+  GMAIL_SCOPES: z.string().optional(),
+
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),
 });

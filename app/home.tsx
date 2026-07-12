@@ -17,6 +17,7 @@ import { clearHulaPreview } from '@/lib/hulaPreview';
 import { getHulaProfile, type HulaProfile } from '@/lib/hulaProfile';
 import { resolveDisplayName, resolveFirstName, resolveInitials } from '@/lib/hulaUser';
 import { clearOnboardingAnswers } from '@/lib/onboardingAnswers';
+import { useIntegrationStatusPrefetch } from '@/hooks/useIntegrationStatusPrefetch';
 import { useSyncHulaProfile } from '@/hooks/useSyncHulaProfile';
 
 const font = hula.typography.fontFamily;
@@ -56,6 +57,10 @@ export default function Home() {
   // Silently mirror local onboarding/profile data to the backend so Hula can be
   // more personal in iMessage. No UI, no popup, no user action — best-effort.
   useSyncHulaProfile();
+
+  // Warm the integration-status cache in the background so tapping Integrations
+  // renders instantly. Best-effort; never blocks navigation.
+  useIntegrationStatusPrefetch();
 
   // Refresh the local name override on focus so a name edited in Settings shows
   // here on return.

@@ -6,8 +6,8 @@ import { hula } from '@/constants/theme';
 const font = hula.typography.fontFamily;
 
 /**
- * A titled category section that lays its cards out in a responsive two-column
- * wrap (Section 13). Reusable for every future integration grouping.
+ * A titled section that stacks its full-width integration rows vertically
+ * (Integrations V2). Reusable for the CONNECTED / AVAILABLE groupings.
  */
 export function IntegrationCategory({
   label,
@@ -19,7 +19,7 @@ export function IntegrationCategory({
   return (
     <View style={styles.section}>
       <Text style={styles.heading}>{label.toUpperCase()}</Text>
-      <View style={styles.grid}>{children}</View>
+      <View style={styles.stack}>{children}</View>
     </View>
   );
 }
@@ -35,9 +35,7 @@ const styles = StyleSheet.create({
     color: hula.colors.text.tertiary,
     marginBottom: hula.spacing.lg,
   },
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  stack: {
     gap: hula.spacing.md,
   },
 });

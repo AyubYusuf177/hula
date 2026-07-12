@@ -53,6 +53,10 @@ async function main(): Promise<void> {
     connectGoogleCalendar,
     GoogleCalendarNotConfiguredError,
     GOOGLE_CALENDAR_PROVIDER,
+    connectGmail,
+    fetchGmailMessages,
+    GmailNotConfiguredError,
+    GMAIL_PROVIDER,
   } = await import('./hulaApi');
 
   await check('connect: POSTs to the provider connect endpoint with a Clerk bearer', async () => {
@@ -90,7 +94,42 @@ async function main(): Promise<void> {
     await assert.rejects(connectGoogleCalendar('t'), /no authorization URL/i);
   });
 
-  console.log(`\nAll ${passed} Hula API (Section 13) tests passed.`);
+  // --- Gmail (Section 14) --------------------------------------------------
+
+  await check('gmail: connect POSTs to the gmail connect endpoint (separate slug)', async () => {
+    assert.notEqual(GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER);
+    const getCalls = stubFetch({
+      ok: true,
+      status: 200,
+      json: { provider: GMAIL_PROVIDER, authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?g=1', expiresAt: '2026-07-11T00:10:00Z' },
+    });
+    const res = await connectGmail('clerk-token-xyz', { appReturnUrl: 'hulaai://integrations' });
+    const [call] = getCalls();
+    assert.equal(call.method, 'POST');
+    assert.equal(call.url, `https://hula.test/v1/me/integrations/${GMAIL_PROVIDER}/connect`);
+    assert.equal(call.headers.Authorization, 'Bearer clerk-token-xyz');
+    assert.equal(res.authorizationUrl, 'https://accounts.google.com/o/oauth2/v2/auth?g=1');
+  });
+
+  await check('gmail: a 400 maps to GmailNotConfiguredError', async () => {
+    stubFetch({ ok: false, status: 400, json: { error: 'gmail_not_configured' } });
+    await assert.rejects(connectGmail('t'), GmailNotConfiguredError);
+  });
+
+  await check('gmail: messages GET hits the gmail messages endpoint (read-only)', async () => {
+    const getCalls = stubFetch({
+      ok: true,
+      status: 200,
+      json: { provider: GMAIL_PROVIDER, messages: [] },
+    });
+    const res = await fetchGmailMessages('tok', { limit: 5 });
+    const [call] = getCalls();
+    assert.equal(call.method ?? 'GET', 'GET');
+    assert.equal(call.url, `https://hula.test/v1/me/integrations/${GMAIL_PROVIDER}/messages?limit=5`);
+    assert.deepEqual(res.messages, []);
+  });
+
+  console.log(`\nAll ${passed} Hula API tests passed.`);
 }
 
 main().catch((err) => {
