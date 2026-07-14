@@ -70,11 +70,19 @@ export interface ActionDefinition {
 }
 
 const GCAL_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 
 /**
- * The action registry. Read actions backed by the Section 11 Google Calendar
- * read-only helper are `implemented + enabled`. Everything else is a STUB: the
- * contract is ready, but no write/send/purchase action executes in this section.
+ * The action registry. `implemented + enabled` means a real deterministic adapter
+ * in the executor backs the action: the Google Calendar reads (Section 11), the
+ * Gmail draft/send writes (Section 16), and the Google Calendar event
+ * create/update/cancel writes (Section 17, confirmation-gated). Everything else is
+ * a STUB — the contract is ready, but the executor never calls a provider for it.
+ *
+ * These flags are load-bearing, not documentation: `evaluateActionForUser` refuses
+ * any action marked `implemented:false` and replies with `userFacingDescription`.
+ * A declaration that disagrees with the executor makes Hula lie in one direction or
+ * the other, so they must be changed together.
  */
 export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
   // --- Calendar ----------------------------------------------------------
@@ -123,7 +131,7 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
     riskLevel: "write",
     confirmationRequired: true,
-    implemented: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
       { name: "title", type: "string", required: true, description: "Event title." },
@@ -133,7 +141,7 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     ],
     examples: ["schedule gym tomorrow at 7pm", "book a call with Sam on Friday"],
     userFacingDescription:
-      "I can prepare that, but creating calendar events isn't enabled yet — I can only read your calendar for now.",
+      "I couldn’t set that event up just now — mind trying again in a moment?",
   },
   {
     actionId: "calendar.updateEvent",
@@ -145,7 +153,7 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
     riskLevel: "write",
     confirmationRequired: true,
-    implemented: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
       { name: "eventId", type: "string", required: true, description: "Event to update." },
@@ -154,7 +162,8 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
       { name: "end", type: "datetime", required: false, description: "New end (ISO 8601)." },
     ],
     examples: ["move my 3pm to 4pm", "rename tomorrow's meeting"],
-    userFacingDescription: "Editing calendar events isn't enabled yet — I can only read your calendar for now.",
+    userFacingDescription:
+      "I couldn’t change that event just now — mind trying again in a moment?",
   },
   {
     actionId: "calendar.cancelEvent",
@@ -166,13 +175,14 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
     riskLevel: "write",
     confirmationRequired: true,
-    implemented: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
       { name: "eventId", type: "string", required: true, description: "Event to cancel." },
     ],
     examples: ["cancel my 2pm", "delete tomorrow's dentist appointment"],
-    userFacingDescription: "Cancelling calendar events isn't enabled yet — I can only read your calendar for now.",
+    userFacingDescription:
+      "I couldn’t cancel that event just now — mind trying again in a moment?",
   },
   // --- Email -------------------------------------------------------------
   {
@@ -243,6 +253,172 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     examples: ["send an email to Rob", "email my accountant the figures"],
     userFacingDescription:
       "I couldn’t set that email up just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "email.updateDraft",
+    category: "email",
+    displayName: "Edit email draft",
+    description:
+      "Replace the body of an existing Gmail draft (Section 17). Executes immediately " +
+      "once the draft is resolved and re-fetched; a draft never leaves the user's control.",
+    providerTypes: ["gmail"],
+    requiredCapabilities: ["email.draft"],
+    // `gmail.compose` authorises drafts.update — verified against Google's
+    // per-method reference. No broader scope is needed.
+    requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
+    riskLevel: "draft",
+    // Editing a draft is not externally visible (it stays in Drafts), so it needs
+    // no confirmation — matching `email.createDraft` on the same risk rung.
+    confirmationRequired: false,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "draftId", type: "string", required: true, description: "Draft to edit." },
+      { name: "body", type: "string", required: true, description: "The complete new body." },
+    ],
+    examples: ["make it shorter", "change Friday to Monday", "make that more professional"],
+    userFacingDescription:
+      "I couldn’t update that draft just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "email.deleteDraft",
+    category: "email",
+    displayName: "Delete email draft",
+    description:
+      "Permanently delete a Gmail draft (Section 17). Gmail does NOT trash a deleted " +
+      "draft — it is irreversible — so this always requires explicit confirmation.",
+    providerTypes: ["gmail"],
+    requiredCapabilities: ["email.draft"],
+    requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
+    // Deliberately "write", not "destructive": the risk ladder HARD-BLOCKS
+    // `destructive`, which would make this unrunnable. The irreversibility is
+    // handled where it belongs — an explicit confirmation plus a preview that says
+    // so — rather than by a rung that forbids the action outright.
+    riskLevel: "write",
+    confirmationRequired: true,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "draftId", type: "string", required: true, description: "Draft to delete." },
+    ],
+    examples: ["delete that draft", "get rid of the draft to Rob"],
+    userFacingDescription:
+      "I couldn’t delete that draft just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "email.modifyLabels",
+    category: "email",
+    displayName: "Change email labels",
+    description:
+      "Add/remove Gmail labels on messages (Section 17): mark read/unread, star/unstar, " +
+      "archive, and apply/remove an existing user label. One action because these are " +
+      "all the same Gmail operation with a different label set.",
+    providerTypes: ["gmail"],
+    requiredCapabilities: ["email.modify"],
+    // `messages.modify` does NOT accept gmail.compose — verified against Google's
+    // per-method reference. gmail.modify is the narrowest scope that works.
+    requiredScopes: [GMAIL_MODIFY_SCOPE],
+    // Reversible, non-external, destroys nothing — see the `modify` rung.
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      {
+        name: "threadIds",
+        type: "string[]",
+        required: false,
+        description:
+          "Conversations to change (Section 17 correction). Present for the UI-aligned path: " +
+          "the change is applied at conversation level and then VERIFIED against Gmail's real " +
+          "state before success is reported.",
+      },
+      {
+        name: "messageIds",
+        type: "string[]",
+        required: false,
+        description:
+          "Messages to change. Required when no threadIds are given; alongside threadIds it " +
+          "names each conversation's newest message, for `mode: latest_message` (star).",
+      },
+      {
+        name: "op",
+        type: "string",
+        required: false,
+        description:
+          "The semantic action (star/unstar/archive/…). Required with threadIds — it selects " +
+          "the postcondition the change must prove.",
+      },
+      {
+        name: "mode",
+        type: "string",
+        required: false,
+        description: "`thread` (default) or `latest_message` — how the change is applied.",
+      },
+      { name: "addLabelIds", type: "string[]", required: false, description: "Label ids to add." },
+      { name: "removeLabelIds", type: "string[]", required: false, description: "Label ids to remove." },
+      { name: "labelId", type: "string", required: false, description: "Resolved user label id, for add/remove_label." },
+    ],
+    examples: ["mark Rob's email as read", "star the second email", "archive those newsletters"],
+    userFacingDescription:
+      "I couldn’t change that email just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "email.trash",
+    category: "email",
+    displayName: "Move email to trash",
+    description:
+      "Move messages to the Gmail trash (Section 17). RECOVERABLE — Gmail keeps trashed " +
+      "mail ~30 days and `email.untrash` restores it. Permanent deletion is NOT implemented.",
+    providerTypes: ["gmail"],
+    requiredCapabilities: ["email.modify"],
+    requiredScopes: [GMAIL_MODIFY_SCOPE],
+    // Consequential enough to confirm (mail leaves the inbox and starts a deletion
+    // clock), but recoverable — so `write`, not `destructive`.
+    riskLevel: "write",
+    confirmationRequired: true,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      {
+        name: "threadIds",
+        type: "string[]",
+        required: false,
+        description: "Conversations to trash (the UI-aligned path). Verified after the change.",
+      },
+      { name: "messageIds", type: "string[]", required: false, description: "Messages to trash." },
+      { name: "op", type: "string", required: false, description: "`trash` — selects the postcondition." },
+    ],
+    examples: ["move that email to trash", "bin those emails"],
+    userFacingDescription:
+      "I couldn’t move that email to trash just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "email.untrash",
+    category: "email",
+    displayName: "Restore email from trash",
+    description: "Restore messages from the Gmail trash (Section 17).",
+    providerTypes: ["gmail"],
+    requiredCapabilities: ["email.modify"],
+    requiredScopes: [GMAIL_MODIFY_SCOPE],
+    // Restorative: it puts mail BACK. Nothing is lost, so no confirmation.
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      {
+        name: "threadIds",
+        type: "string[]",
+        required: false,
+        description: "Conversations to restore (the UI-aligned path). Verified after the change.",
+      },
+      { name: "messageIds", type: "string[]", required: false, description: "Messages to restore." },
+      { name: "op", type: "string", required: false, description: "`untrash` — selects the postcondition." },
+    ],
+    examples: ["restore the email I just trashed", "undo that trash"],
+    userFacingDescription:
+      "I couldn’t restore that email just now — mind trying again in a moment?",
   },
   // --- Tasks -------------------------------------------------------------
   {

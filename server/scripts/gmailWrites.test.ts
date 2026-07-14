@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 
+import type { LoadedGmailSelection } from "../src/integrations/providers/gmail/gmailSelection";
+
 import {
   MimeError,
   assertNoHeaderInjection,
@@ -1236,6 +1238,180 @@ asyncCheck("typo: 'draft a reply to Ron's latest email' returns an honest not-fo
   assert.equal(r.reply, GMAIL_WRITE_REPLIES.threadNotFound);
   assert.equal(calls.executed.length, 0);
   assert.equal(calls.clarified.length, 0);
+});
+
+// ==========================================================================
+// Section 17 / Phase 3.3 — replying to a SELECTED email ("the second one")
+// ==========================================================================
+
+/** A remembered list of shown messages, as the search handler records it. */
+function messageSelection(ids: string[]): LoadedGmailSelection {
+  return {
+    id: "sel_1",
+    data: {
+      kind: "gmail_selection",
+      itemKind: "messages",
+      items: ids.map((id, i) => ({
+        id,
+        threadId: `t_${id}`,
+        label: `Sender${i + 1}`,
+        subject: `Subject${i + 1}`,
+      })),
+    },
+    expired: false,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+asyncCheck("selected reply: 'the second one' replies to the email at position 2", async () => {
+  const fetched: string[] = [];
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "send_reply", body: "I’ll look at it tonight." } as GmailAction),
+    loadSelection: async () => messageSelection(["m_a", "m_b", "m_c"]),
+    fetchReplyContext: async (_u, messageId) => {
+      fetched.push(messageId);
+      return {
+        threadId: "t_m_b",
+        messageIdHeader: "<orig@mail>",
+        references: null,
+        replyToAddress: "sarah@example.com",
+        replyToName: "Sarah",
+        subject: "Invoice",
+      };
+    },
+    // A fetch of the recent-message list would mean it fell back to sender
+    // matching — which must NOT happen when a position was given.
+    fetchMessages: async () => {
+      throw new Error("must not re-fetch when a position was given");
+    },
+  });
+  const r = await handleGmailWrite("u", "reply to the second email saying I’ll look at it tonight", deps);
+  assert.equal(r.handled, true);
+  assert.deepEqual(fetched, ["m_b"], "must reply to the email shown as '2.'");
+  // A SEND still requires confirmation — the position doesn't bypass that.
+  assert.equal(calls.executed.length, 0, "no send before approval");
+  assert.equal(calls.proposed.length, 1);
+});
+
+asyncCheck("selected reply: threading comes from the selected email's real headers", async () => {
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "send_reply", body: "Sounds good." } as GmailAction),
+    loadSelection: async () => messageSelection(["m_a", "m_b"]),
+    fetchReplyContext: async () => ({
+      threadId: "t_real",
+      messageIdHeader: "<orig@mail>",
+      references: "<older@mail>",
+      replyToAddress: "sarah@example.com",
+      replyToName: "Sarah",
+      subject: "Invoice",
+    }),
+    fetchMessages: async () => [],
+  });
+  await handleGmailWrite("u", "reply to the second one saying sounds good", deps);
+  const input = calls.proposed[0]!.input as Record<string, unknown>;
+  assert.equal(input.threadId, "t_real", "must stay in the selected email's thread");
+  assert.equal(input.inReplyTo, "<orig@mail>");
+  assert.ok(String(input.references).includes("<older@mail>"), "References chain must be preserved");
+  assert.equal(input.isReply, true);
+  assert.equal(input.to, "sarah@example.com");
+});
+
+asyncCheck("selected reply: a draft reply to a position executes immediately", async () => {
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "create_reply_draft", body: "Noted." } as GmailAction),
+    loadSelection: async () => messageSelection(["m_a", "m_b"]),
+    fetchReplyContext: async () => ({
+      threadId: "t_m_a",
+      messageIdHeader: "<a@mail>",
+      references: null,
+      replyToAddress: "rob@example.com",
+      replyToName: "Rob",
+      subject: "Friday",
+    }),
+    fetchMessages: async () => [],
+  });
+  await handleGmailWrite("u", "draft a reply to the first one saying noted", deps);
+  assert.equal(calls.executed.length, 1);
+  assert.equal(calls.executed[0]!.actionId, "email.createDraft");
+  assert.equal(calls.proposed.length, 0, "a draft needs no send proposal");
+});
+
+asyncCheck("selected reply: an out-of-range position replies to NOTHING", async () => {
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "send_reply", body: "Yes." } as GmailAction),
+    loadSelection: async () => messageSelection(["m_a", "m_b"]),
+    fetchReplyContext: async () => {
+      throw new Error("must never fetch a thread for an invalid position");
+    },
+    fetchMessages: async () => [],
+  });
+  const r = await handleGmailWrite("u", "reply to the fifth one saying yes", deps);
+  assert.equal(r.reply, GMAIL_WRITE_REPLIES.selectionOutOfRange);
+  assert.equal(calls.proposed.length, 0);
+  assert.equal(calls.executed.length, 0);
+});
+
+asyncCheck("selected reply: a position with no remembered list asks, never guesses", async () => {
+  // Falling back to sender matching here would reply to a DIFFERENT email than the
+  // one the user thinks they picked.
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "send_reply", body: "Yes." } as GmailAction),
+    loadSelection: async () => null,
+    fetchReplyContext: async () => {
+      throw new Error("must never fetch a thread without a resolved selection");
+    },
+    fetchMessages: async () => [msg({ fromName: "Rob" })],
+  });
+  const r = await handleGmailWrite("u", "reply to the second one saying yes", deps);
+  assert.equal(r.reply, GMAIL_WRITE_REPLIES.noSelection);
+  assert.equal(calls.proposed.length, 0);
+});
+
+asyncCheck("selected reply: a DRAFT selection is never used to resolve an email", async () => {
+  // The two selection kinds must not cross: "the second one" after a DRAFT list is
+  // not an email at position 2.
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "send_reply", body: "Yes." } as GmailAction),
+    loadSelection: async () => ({
+      id: "sel_d",
+      data: {
+        kind: "gmail_selection" as const,
+        itemKind: "drafts" as const,
+        items: [{ id: "d1", threadId: null, label: "Rob", subject: "x" }],
+      },
+      expired: false,
+      createdAt: new Date().toISOString(),
+    }),
+    fetchReplyContext: async () => {
+      throw new Error("must never resolve an email from a draft selection");
+    },
+    fetchMessages: async () => [],
+  });
+  const r = await handleGmailWrite("u", "reply to the first one saying yes", deps);
+  assert.equal(r.reply, GMAIL_WRITE_REPLIES.noSelection);
+  assert.equal(calls.proposed.length, 0);
+});
+
+asyncCheck("selected reply: without a position, sender matching is unchanged", async () => {
+  // Regression: the Section 16 path must behave exactly as before.
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "create_reply_draft", recipientName: "Rob", body: "Yes." } as GmailAction),
+    loadSelection: async () => {
+      throw new Error("must not consult a selection when no position was given");
+    },
+    fetchMessages: async () => [msg({ id: "m_rob", fromName: "Rob", fromAddress: "rob@example.com" })],
+    fetchReplyContext: async () => ({
+      threadId: "t_rob",
+      messageIdHeader: "<r@mail>",
+      references: null,
+      replyToAddress: "rob@example.com",
+      replyToName: "Rob",
+      subject: "Friday",
+    }),
+  });
+  const r = await handleGmailWrite("u", "draft a reply to Rob's latest email saying yes", deps);
+  assert.equal(r.handled, true);
+  assert.equal(calls.executed.length, 1, "sender-matched replies still work");
 });
 
 async function run(): Promise<void> {

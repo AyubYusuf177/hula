@@ -542,11 +542,14 @@ export function isReconnectReason(reason: GmailErrorReason): boolean {
 
 // --- Write-capable requests (Section 16) ---------------------------------
 
-/** HTTP methods a Gmail WRITE may use. GET stays on `gmailGet`. */
-export type GmailWriteMethod = "POST" | "DELETE";
+/**
+ * HTTP methods a Gmail WRITE may use. GET stays on `gmailGet`.
+ * PUT is required by `drafts.update`, which fully REPLACES a draft (Section 17).
+ */
+export type GmailWriteMethod = "POST" | "PUT" | "DELETE";
 
 /**
- * Authenticated write (POST/DELETE) against the Gmail API.
+ * Authenticated write (POST/PUT/DELETE) against the Gmail API.
  *
  * Mirrors `gmailGet`'s SAFETY exactly — the same absolute-URL building, token
  * shape guard, per-attempt abort timeout, precise fetch-exception mapping, and

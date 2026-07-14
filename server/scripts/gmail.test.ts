@@ -122,10 +122,18 @@ async function main(): Promise<void> {
     assert.ok(gmail?.capabilities.includes("email.read"));
     assert.ok(gmail?.capabilities.includes("email.draft"));
     assert.ok(gmail?.capabilities.includes("email.send"));
-    // Requests read-only + the least-privilege compose scope (no modify/full mailbox).
+    // Section 17: message management additionally needs `email.modify`.
+    assert.ok(gmail?.capabilities.includes("email.modify"));
+    // Requests read-only + compose (Section 16) + modify (Section 17). `gmail.modify`
+    // is unavoidable — Google does not accept `gmail.compose` for
+    // messages.modify/trash/untrash — but it is ADDED, never a replacement, so the
+    // Section 16 capabilities keep their own scopes.
     assert.ok(gmail?.defaultScopes.includes(GMAIL_READONLY_SCOPE));
     assert.ok(gmail?.defaultScopes.includes("https://www.googleapis.com/auth/gmail.compose"));
-    assert.ok(!gmail?.defaultScopes.some((s) => /gmail\.modify|mail\.google\.com/.test(s)));
+    assert.ok(gmail?.defaultScopes.includes("https://www.googleapis.com/auth/gmail.modify"));
+    // The full-mailbox scope stays forbidden: it is the only one that adds permanent
+    // deletion bypassing the trash, and Hula implements no such action.
+    assert.ok(!gmail?.defaultScopes.some((s) => /mail\.google\.com/.test(s)));
   });
 
   // --- OAuth config --------------------------------------------------------
@@ -153,10 +161,13 @@ async function main(): Promise<void> {
       assert.equal(config.redirectUri, TEST_CONFIG.redirectUri);
       const def = getProvider(GMAIL_PROVIDER)?.defaultScopes ?? [];
       assert.deepEqual(config.scopes, def);
-      // Section 16: defaults include read-only + compose; never a broader scope.
+      // Defaults: read-only + compose (Section 16) + modify (Section 17).
       assert.ok(config.scopes.some((s) => /gmail\.readonly/.test(s)), "includes read-only");
       assert.ok(config.scopes.some((s) => /gmail\.compose/.test(s)), "includes compose");
-      assert.ok(!config.scopes.some((s) => /gmail\.modify|mail\.google\.com/.test(s)), "no broad scope");
+      assert.ok(config.scopes.some((s) => /gmail\.modify/.test(s)), "includes modify");
+      // The full-mailbox scope is the one that stays forbidden — it would add
+      // permanent deletion bypassing the trash, which Hula never performs.
+      assert.ok(!config.scopes.some((s) => /mail\.google\.com/.test(s)), "no full-mailbox scope");
     } finally {
       env.GOOGLE_OAUTH_CLIENT_ID = saved.id;
       env.GOOGLE_OAUTH_CLIENT_SECRET = saved.secret;

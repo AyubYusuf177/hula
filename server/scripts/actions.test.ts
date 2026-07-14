@@ -16,6 +16,11 @@ import { detectActionIntent } from "../src/actions/detect";
 import { executeAction } from "../src/actions/executor";
 import type { RecordExecutionInput } from "../src/actions/executions";
 import type { NormalizedCalendarEvent } from "../src/integrations/providers/googleCalendar/types";
+import { GmailError } from "../src/integrations/providers/gmail/client";
+import {
+  GoogleCalendarError,
+  type GoogleCalendarErrorReason,
+} from "../src/integrations/providers/googleCalendar/client";
 
 /**
  * Offline tests for the Section 12 agentic action runtime. Everything here is
@@ -51,6 +56,28 @@ function connectedCalendarContext(userConfirmed?: boolean): ActionPolicyContext 
     capabilitiesByProvider: { google_calendar: ["read_calendar_events"] },
     userConfirmed,
   };
+}
+
+/**
+ * A calendar connection that granted the WRITE scope + capability (Section 17) —
+ * i.e. a user who reconnected after calendar writes shipped.
+ */
+function writeCalendarContext(userConfirmed?: boolean): ActionPolicyContext {
+  return {
+    connectedProviders: ["google_calendar"],
+    grantedScopesByProvider: {
+      google_calendar: [GCAL_READONLY, "https://www.googleapis.com/auth/calendar.events"],
+    },
+    capabilitiesByProvider: {
+      google_calendar: ["read_calendar_events", "write_calendar_events"],
+    },
+    userConfirmed,
+  };
+}
+
+/** An ISO instant safely in the future (default +1h), for never-past checks. */
+function futureIso(offsetMinutes = 60): string {
+  return new Date(Date.now() + offsetMinutes * 60_000).toISOString();
 }
 
 /** An empty context — nothing connected. */
@@ -92,7 +119,10 @@ check("registry: every action has complete, typed metadata", () => {
     assert.ok(a.displayName.length > 0, "displayName required");
     assert.ok(a.userFacingDescription.length > 0, "userFacingDescription required");
     assert.ok(
-      ["read", "draft", "write", "send", "purchase", "destructive"].includes(a.riskLevel),
+      ["read", "draft", "modify", "write", "send", "purchase", "destructive"].includes(
+        a.riskLevel,
+      ),
+      `${a.actionId} has an unknown risk level: ${a.riskLevel}`,
     );
     assert.ok(Array.isArray(a.providerTypes));
     assert.ok(Array.isArray(a.requiredScopes));
@@ -102,35 +132,136 @@ check("registry: every action has complete, typed metadata", () => {
   }
 });
 
-check("registry: implemented actions are the calendar reads + Gmail draft/send", () => {
+check("registry: implemented actions are the calendar reads/writes + Gmail draft/send", () => {
   const implemented = ACTION_DEFINITIONS.filter((a) => a.implemented).map((a) => a.actionId);
-  // Section 16 adds real Gmail draft creation + send to the Section 11 calendar reads.
+  // Section 16 added real Gmail draft creation + send to the Section 11 calendar
+  // reads; Section 17 adds the confirmation-gated calendar event writes.
   assert.deepEqual(implemented.sort(), [
+    "calendar.cancelEvent",
+    "calendar.createEvent",
     "calendar.findNextEvent",
     "calendar.listEvents",
+    "calendar.updateEvent",
     "email.createDraft",
+    "email.deleteDraft",
+    "email.modifyLabels",
     "email.sendDraft",
+    "email.trash",
+    "email.untrash",
+    "email.updateDraft",
   ]);
   // No implemented action is a purchase/destructive risk.
   for (const a of ACTION_DEFINITIONS) {
     if (a.implemented) {
       assert.ok(
-        ["read", "draft", "send"].includes(a.riskLevel),
+        ["read", "draft", "modify", "write", "send"].includes(a.riskLevel),
         `${a.actionId} unexpected implemented risk: ${a.riskLevel}`,
       );
     }
   }
 });
 
-check("registry: risk levels and confirmation rules are coherent", () => {
+check("registry: no implemented action still carries stale 'not enabled yet' copy", () => {
+  // Section 17 guard. The registry's userFacingDescription is what policy replies
+  // with, so an implemented action describing itself as unavailable makes Hula deny
+  // a capability it actually has (which is exactly what the calendar writes did
+  // between Sections 15 and 17).
   for (const a of ACTION_DEFINITIONS) {
-    if (a.riskLevel === "read" || a.riskLevel === "draft") {
-      // Reads and drafts never leave Hula's control -> no confirmation.
-      assert.equal(a.confirmationRequired, false, `${a.actionId} ${a.riskLevel} needs no confirmation`);
+    if (!a.implemented) continue;
+    assert.ok(
+      !/isn.t enabled yet|not enabled yet|can.t do that action yet/i.test(a.userFacingDescription),
+      `${a.actionId} is implemented but its copy claims it is not enabled`,
+    );
+  }
+});
+
+check("registry: draft delete requires confirmation; draft edit does not", () => {
+  // The Section 17 asymmetry that matters. Deleting a Gmail draft is irreversible
+  // (Gmail does not trash it), so it must be confirmed. Editing one stays in the
+  // user's Drafts and is freely reversible, so it must NOT nag — the same rung
+  // `email.createDraft` already sits on.
+  const del = getActionDefinition("email.deleteDraft") as ActionDefinition;
+  assert.equal(del.confirmationRequired, true, "draft deletion must be confirmed");
+  assert.notEqual(del.riskLevel, "destructive", "destructive is hard-blocked by policy");
+
+  const edit = getActionDefinition("email.updateDraft") as ActionDefinition;
+  assert.equal(edit.confirmationRequired, false, "editing a draft must not need confirmation");
+  assert.equal(edit.riskLevel, "draft");
+});
+
+check("registry: the draft lifecycle needs no scope beyond gmail.compose", () => {
+  // Verified against Google's per-method reference: drafts.list/get/update/delete
+  // all accept gmail.compose. Requesting gmail.modify or https://mail.google.com/
+  // would force every existing user to reconnect for no capability gain.
+  for (const id of ["email.updateDraft", "email.deleteDraft"]) {
+    const a = getActionDefinition(id) as ActionDefinition;
+    assert.deepEqual(a.requiredScopes, ["https://www.googleapis.com/auth/gmail.compose"]);
+  }
+});
+
+check("registry: every calendar write requires confirmation and the events scope", () => {
+  const writes = ["calendar.createEvent", "calendar.updateEvent", "calendar.cancelEvent"];
+  for (const id of writes) {
+    const a = ACTION_DEFINITIONS.find((x) => x.actionId === id);
+    assert.ok(a, `${id} must exist`);
+    assert.equal(a!.confirmationRequired, true, `${id} must require confirmation`);
+    assert.ok(
+      a!.requiredScopes.includes("https://www.googleapis.com/auth/calendar.events"),
+      `${id} must require the calendar.events scope`,
+    );
+  }
+});
+
+check("registry: risk levels and confirmation rules are coherent", () => {
+  // The rungs BELOW `write` are the ones that never leave the user's control and
+  // can always be undone, so they must not nag. Everything from `write` up is
+  // either irreversible or externally visible, so it must be confirmed. Section 17
+  // added `modify` (mark read, star, archive, label) to the no-confirmation set.
+  const noConfirmation = new Set(["read", "draft", "modify"]);
+  for (const a of ACTION_DEFINITIONS) {
+    if (noConfirmation.has(a.riskLevel)) {
+      assert.equal(
+        a.confirmationRequired,
+        false,
+        `${a.actionId} (${a.riskLevel}) is reversible and must not require confirmation`,
+      );
     } else {
-      // write/send/purchase/destructive require confirmation.
       assert.equal(a.confirmationRequired, true, `${a.actionId} must require confirmation`);
     }
+  }
+});
+
+check("registry: the `modify` rung is only used for reversible, non-external actions", () => {
+  // A guard on the rung itself. `modify` skips confirmation, so anything filed
+  // there that could actually lose data or reach another person would silently
+  // bypass the one gate protecting the user.
+  const allowed = new Set(["email.modifyLabels", "email.untrash"]);
+  for (const a of ACTION_DEFINITIONS) {
+    if (a.riskLevel !== "modify") continue;
+    assert.ok(
+      allowed.has(a.actionId),
+      `${a.actionId} is on the no-confirmation \`modify\` rung — prove it is reversible and non-external, then allowlist it here`,
+    );
+  }
+});
+
+check("registry: trashing is confirmed and is the only email removal", () => {
+  const trash = getActionDefinition("email.trash") as ActionDefinition;
+  assert.equal(trash.confirmationRequired, true, "trashing must be confirmed");
+  assert.equal(trash.riskLevel, "write");
+  // Permanent deletion must not exist at all — it needs the full-mailbox scope and
+  // cannot be undone.
+  const ids = listActionDefinitions().map((a) => a.actionId);
+  for (const forbidden of ["email.delete", "email.deleteMessage", "email.purge"]) {
+    assert.equal(ids.includes(forbidden), false, `${forbidden} must never exist`);
+  }
+  // And no action may ever request the full-mailbox scope.
+  for (const a of ACTION_DEFINITIONS) {
+    assert.equal(
+      a.requiredScopes.includes("https://mail.google.com/"),
+      false,
+      `${a.actionId} must not request the full-mailbox scope`,
+    );
   }
 });
 
@@ -172,12 +303,45 @@ check("policy: read action BLOCKED when scope not granted", () => {
 });
 
 check("policy: stub write action returns not_implemented", () => {
-  const action = getActionDefinition("calendar.createEvent") as ActionDefinition;
-  // Even with a fully connected calendar, an unimplemented action can't run.
+  // `task.create` is still a genuine stub (the calendar writes stopped being one in
+  // Section 17). `implemented` is checked before connection/scope, so this holds
+  // regardless of context.
+  const action = getActionDefinition("task.create") as ActionDefinition;
   const result = evaluateActionForUser(action, connectedCalendarContext(true));
   assert.equal(result.allowed, false);
   assert.equal(result.blockedReason, "not_implemented");
   assert.ok((result.userMessage ?? "").length > 0);
+});
+
+check("policy: an implemented calendar write needs confirmation before it may run", () => {
+  const action = getActionDefinition("calendar.createEvent") as ActionDefinition;
+  // Fully connected + correct scope, but NOT confirmed -> must not be allowed.
+  const unconfirmed = evaluateActionForUser(action, writeCalendarContext());
+  assert.equal(unconfirmed.allowed, false);
+  assert.equal(unconfirmed.needsConfirmation, true);
+  assert.equal(unconfirmed.blockedReason, "needs_confirmation");
+
+  // Same context, explicitly confirmed -> allowed.
+  const confirmed = evaluateActionForUser(action, writeCalendarContext(true));
+  assert.equal(confirmed.allowed, true);
+  assert.equal(confirmed.provider, "google_calendar");
+});
+
+check("policy: a read-only calendar connection cannot run a calendar write", () => {
+  const action = getActionDefinition("calendar.createEvent") as ActionDefinition;
+  // Connected, but only the readonly scope was granted -> honest needs_scope, which
+  // the caller surfaces as "reconnect", never as a silent success.
+  const result = evaluateActionForUser(action, {
+    connectedProviders: ["google_calendar"],
+    grantedScopesByProvider: {
+      google_calendar: ["https://www.googleapis.com/auth/calendar.readonly"],
+    },
+    capabilitiesByProvider: { google_calendar: ["read_calendar_events"] },
+    userConfirmed: true,
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.needsScope, true);
+  assert.equal(result.blockedReason, "needs_scope");
 });
 
 check("policy: purchases and destructive actions are blocked", () => {
@@ -326,8 +490,8 @@ asyncCheck("executor: stub write action is blocked with an honest message", asyn
   const recorded: RecordExecutionInput[] = [];
   const result = await executeAction(
     "user_fake",
-    "calendar.createEvent",
-    { input: { title: "Gym" } },
+    "task.create",
+    { input: { title: "Call the bank" } },
     {
       buildContext: async () => connectedCalendarContext(true),
       record: async (_userId, input) => {
@@ -339,7 +503,384 @@ asyncCheck("executor: stub write action is blocked with an honest message", asyn
   assert.equal(result.ok, false);
   assert.equal(result.status, "blocked");
   assert.equal(recorded[0]?.status, "blocked");
-  assert.ok(/not enabled|only read/i.test(result.userMessage), "must stay honest");
+  assert.ok(/can't add tasks yet/i.test(result.userMessage), "must stay honest");
+});
+
+asyncCheck(
+  "executor: a read-only calendar connection is blocked (no write) for calendar.createEvent",
+  async () => {
+    // Section 17 regression: an existing user who connected before writes shipped
+    // holds only calendar.readonly. The write must be refused honestly and must NOT
+    // reach Google.
+    let called = false;
+    const recorded: RecordExecutionInput[] = [];
+    const result = await executeAction(
+      "user_fake",
+      "calendar.createEvent",
+      { input: { title: "Gym", startIso: futureIso(), endIso: futureIso(60) }, userConfirmed: true },
+      {
+        buildContext: async () => connectedCalendarContext(true),
+        record: async (_userId, input) => {
+          recorded.push(input);
+          return "exec_ro";
+        },
+        createCalendarEvent: async () => {
+          called = true;
+          throw new Error("must never reach Google");
+        },
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "blocked");
+    assert.equal(called, false, "a read-only connection must never call the provider");
+    assert.equal(recorded[0]?.status, "blocked");
+  },
+);
+
+// --- Section 17: executor calendar write adapters ------------------------
+
+/** A normalized event as Google would confirm it back after a write. */
+function fakeEvent(id: string, startIso: string, endIso: string): NormalizedCalendarEvent {
+  return {
+    id,
+    calendarId: "primary",
+    summary: "Gym",
+    location: null,
+    start: startIso,
+    end: endIso,
+    allDay: false,
+    status: "confirmed",
+    htmlLink: null,
+    attendeeCount: null,
+    organizerEmail: null,
+    source: "google_calendar",
+  };
+}
+
+asyncCheck("executor: confirmed calendar create writes and confirms from the real event", async () => {
+  const start = futureIso(60);
+  const end = futureIso(120);
+  const recorded: RecordExecutionInput[] = [];
+  let sentFields: unknown = null;
+  const result = await executeAction(
+    "user_fake",
+    "calendar.createEvent",
+    {
+      input: { title: "Gym", startIso: start, endIso: end, timezone: "America/New_York" },
+      userConfirmed: true,
+      proposalId: "prop_1",
+    },
+    {
+      buildContext: async () => writeCalendarContext(true),
+      record: async (_u, input) => {
+        recorded.push(input);
+        return "exec_c";
+      },
+      createCalendarEvent: async (_u, fields) => {
+        sentFields = fields;
+        return fakeEvent("evt_new", start, end);
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.receipt?.eventId, "evt_new");
+  assert.ok(/scheduled/i.test(result.userMessage));
+  assert.ok(sentFields, "provider must have been called");
+  // The ledger keeps the Google-issued id only — never the title or times.
+  assert.deepEqual(recorded[0]?.resultSummary, { eventId: "evt_new" });
+  assert.equal(JSON.stringify(recorded).includes("Gym"), false, "no event title in the ledger");
+});
+
+asyncCheck("executor: calendar create never claims success on a past start", async () => {
+  // Never-past must hold at EXECUTION time, not only when the proposal was made:
+  // confirming late must not create an event in the past.
+  let called = false;
+  const result = await executeAction(
+    "user_fake",
+    "calendar.createEvent",
+    {
+      input: { title: "Gym", startIso: futureIso(-120), endIso: futureIso(-60) },
+      userConfirmed: true,
+    },
+    {
+      buildContext: async () => writeCalendarContext(true),
+      record: async () => "exec_past",
+      createCalendarEvent: async () => {
+        called = true;
+        throw new Error("must never be called for a past start");
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(called, false, "a past start must never reach Google");
+  assert.ok(/already passed/i.test(result.userMessage));
+});
+
+asyncCheck("executor: calendar update targets the resolved event id verbatim", async () => {
+  const start = futureIso(60);
+  const end = futureIso(120);
+  let targetedId = "";
+  const result = await executeAction(
+    "user_fake",
+    "calendar.updateEvent",
+    {
+      input: { eventId: "evt_lunch", startIso: start, endIso: end, renamedOnly: false },
+      userConfirmed: true,
+    },
+    {
+      buildContext: async () => writeCalendarContext(true),
+      record: async () => "exec_u",
+      updateCalendarEvent: async (_u, id) => {
+        targetedId = id;
+        return fakeEvent("evt_lunch", start, end);
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(targetedId, "evt_lunch", "must update exactly the previewed event");
+  assert.equal(result.receipt?.eventId, "evt_lunch");
+});
+
+asyncCheck("executor: confirmed calendar delete reports only a real provider delete", async () => {
+  const removed: string[] = [];
+  const result = await executeAction(
+    "user_fake",
+    "calendar.cancelEvent",
+    {
+      input: { eventId: "evt_lunch", title: "Lunch with Adam", startIso: futureIso(60) },
+      userConfirmed: true,
+    },
+    {
+      buildContext: async () => writeCalendarContext(true),
+      record: async () => "exec_d",
+      deleteCalendarEvent: async (_u, id) => {
+        removed.push(id);
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(removed, ["evt_lunch"]);
+  assert.ok(/deleted/i.test(result.userMessage));
+  assert.ok(result.userMessage.includes("Lunch with Adam"));
+});
+
+asyncCheck("executor: a failed provider delete is never reported as deleted", async () => {
+  const result = await executeAction(
+    "user_fake",
+    "calendar.cancelEvent",
+    { input: { eventId: "evt_x", title: "Lunch" }, userConfirmed: true },
+    {
+      buildContext: async () => writeCalendarContext(true),
+      record: async () => "exec_df",
+      deleteCalendarEvent: async () => {
+        throw new GoogleCalendarError("calendar_not_found", "gone", 404);
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "failed");
+  assert.ok(!/deleted/i.test(result.userMessage), "must not claim a deletion happened");
+});
+
+asyncCheck("executor: a calendar provider failure maps to an honest reply, no false success", async () => {
+  const cases: Array<[GoogleCalendarErrorReason, RegExp]> = [
+    ["not_connected", /connected/i],
+    ["insufficient_scope", /permission|reconnect/i],
+    ["provider_unavailable", /trouble reaching|trying again/i],
+  ];
+  for (const [reason, expected] of cases) {
+    const result = await executeAction(
+      "user_fake",
+      "calendar.createEvent",
+      { input: { title: "Gym", startIso: futureIso(60), endIso: futureIso(120) }, userConfirmed: true },
+      {
+        buildContext: async () => writeCalendarContext(true),
+        record: async () => "exec_f",
+        createCalendarEvent: async () => {
+          throw new GoogleCalendarError(reason, "failed");
+        },
+      },
+    );
+    assert.equal(result.ok, false, `${reason} must not succeed`);
+    assert.ok(expected.test(result.userMessage), `${reason} -> unexpected copy: ${result.userMessage}`);
+    assert.ok(!/scheduled|done/i.test(result.userMessage), `${reason} must not read as success`);
+  }
+});
+
+// --- Section 17 / 3.5: message-management adapter ------------------------
+
+/** A Gmail connection that granted the Section 17 modify scope. */
+function gmailModifyContext(userConfirmed?: boolean): ActionPolicyContext {
+  return {
+    connectedProviders: ["gmail"],
+    grantedScopesByProvider: {
+      gmail: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+      ],
+    },
+    capabilitiesByProvider: {
+      gmail: ["email.read", "email.draft", "email.send", "email.modify"],
+    },
+    userConfirmed,
+  };
+}
+
+asyncCheck("executor: a label change applies to each message and reports the count", async () => {
+  const touched: string[] = [];
+  const recorded: RecordExecutionInput[] = [];
+  const result = await executeAction(
+    "user_fake",
+    "email.modifyLabels",
+    { input: { messageIds: ["m1", "m2"], removeLabelIds: ["UNREAD"], summary: "marked as read" } },
+    {
+      buildContext: async () => gmailModifyContext(),
+      record: async (_u, input) => {
+        recorded.push(input);
+        return "exec_m";
+      },
+      modifyGmailMessageLabels: async (_u, id) => {
+        touched.push(id);
+        return { id, labelIds: [] };
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(touched, ["m1", "m2"]);
+  assert.ok(/Marked as read 2 emails\./.test(result.userMessage), result.userMessage);
+  // The ledger keeps counts only — never senders or subjects.
+  assert.deepEqual(recorded[0]?.resultSummary, { succeeded: 2, failed: 0 });
+});
+
+asyncCheck("executor: a PARTIAL bulk failure is reported as partial, never as done", async () => {
+  // Gmail has no batch endpoint, so N messages is N calls and some can fail.
+  // Reporting "archived 3" when one failed would be a plain lie.
+  const result = await executeAction(
+    "user_fake",
+    "email.modifyLabels",
+    { input: { messageIds: ["m1", "m2", "m3"], removeLabelIds: ["INBOX"], summary: "archived" } },
+    {
+      buildContext: async () => gmailModifyContext(),
+      record: async () => "exec_p",
+      modifyGmailMessageLabels: async (_u, id) => {
+        if (id === "m2") throw new GmailError("provider_unavailable", "boom", 503);
+        return { id, labelIds: [] };
+      },
+    },
+  );
+  assert.equal(result.ok, false, "a partial failure is not a success");
+  assert.equal(result.status, "failed");
+  assert.ok(/2 of 3/.test(result.userMessage), `must state the real numbers: ${result.userMessage}`);
+  assert.ok(/didn’t go through/.test(result.userMessage));
+});
+
+asyncCheck("executor: a missing modify scope stops at the FIRST message", async () => {
+  // A scope failure applies to every message — hammering Gmail with N calls that
+  // will all fail identically is pointless and rate-limits the user.
+  let attempts = 0;
+  const result = await executeAction(
+    "user_fake",
+    "email.modifyLabels",
+    { input: { messageIds: ["m1", "m2", "m3"], addLabelIds: ["STARRED"], summary: "starred" } },
+    {
+      buildContext: async () => gmailModifyContext(),
+      record: async () => "exec_s",
+      modifyGmailMessageLabels: async () => {
+        attempts += 1;
+        throw new GmailError("insufficient_scope", "nope", 403);
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(attempts, 1, "must not retry a scope failure per message");
+  assert.ok(/reconnect Gmail/i.test(result.userMessage), result.userMessage);
+  assert.ok(!/starred/i.test(result.userMessage), "must not claim anything was starred");
+});
+
+asyncCheck("executor: a pre-Section-17 connection is refused before reaching Gmail", async () => {
+  // The real upgrade case: a user connected under Section 16 holds readonly +
+  // compose but NOT modify. Policy must refuse, and Gmail must never be called.
+  let called = false;
+  const result = await executeAction(
+    "user_fake",
+    "email.modifyLabels",
+    { input: { messageIds: ["m1"], addLabelIds: ["STARRED"], summary: "starred" } },
+    {
+      buildContext: async () => ({
+        connectedProviders: ["gmail"],
+        grantedScopesByProvider: {
+          gmail: [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+          ],
+        },
+        capabilitiesByProvider: { gmail: ["email.read", "email.draft", "email.send"] },
+      }),
+      record: async () => "exec_old",
+      modifyGmailMessageLabels: async () => {
+        called = true;
+        return { id: "m1", labelIds: [] };
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "blocked");
+  assert.equal(called, false, "a connection without gmail.modify must never reach Gmail");
+});
+
+asyncCheck("executor: trashing requires confirmation and is recoverable", async () => {
+  // Unconfirmed -> blocked.
+  let called = false;
+  const blocked = await executeAction(
+    "user_fake",
+    "email.trash",
+    { input: { messageIds: ["m1"], summary: "moved to trash" } },
+    {
+      buildContext: async () => gmailModifyContext(),
+      record: async () => "exec_t1",
+      trashGmailMessage: async () => {
+        called = true;
+        return { id: "m1", labelIds: [] };
+      },
+    },
+  );
+  assert.equal(blocked.ok, false);
+  assert.equal(called, false, "trash must never run without confirmation");
+
+  // Confirmed -> runs.
+  const ok = await executeAction(
+    "user_fake",
+    "email.trash",
+    { input: { messageIds: ["m1"], summary: "moved to trash" }, userConfirmed: true },
+    {
+      buildContext: async (_u, o) => gmailModifyContext(o.userConfirmed),
+      record: async () => "exec_t2",
+      trashGmailMessage: async (_u, id) => ({ id, labelIds: ["TRASH"] }),
+    },
+  );
+  assert.equal(ok.ok, true);
+  assert.ok(/Moved to trash 1 email\./.test(ok.userMessage), ok.userMessage);
+});
+
+asyncCheck("executor: an empty label change is refused, not sent to Gmail", async () => {
+  let called = false;
+  const result = await executeAction(
+    "user_fake",
+    "email.modifyLabels",
+    { input: { messageIds: ["m1"], addLabelIds: [], removeLabelIds: [] } },
+    {
+      buildContext: async () => gmailModifyContext(),
+      record: async () => "exec_e",
+      modifyGmailMessageLabels: async () => {
+        called = true;
+        return { id: "m1", labelIds: [] };
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(called, false);
 });
 
 asyncCheck("executor: unknown action fails safely without a provider call", async () => {

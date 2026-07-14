@@ -71,7 +71,48 @@ export function buildEventBody(fields: CalendarEventWriteFields): Record<string,
   return body;
 }
 
-/** Create an event on the user's primary calendar. Returns the normalized event. */
+/**
+ * Validate a Google event response before ANY success claim (Section 17).
+ *
+ * Mirrors the Gmail rule: a write is only "done" when the provider echoes back a
+ * real, Google-issued event identifier. A 2xx carrying a malformed or id-less body
+ * is NOT evidence the event exists, so it must fail rather than be formatted as a
+ * success. When `expectedId` is given (an update), the response must describe the
+ * event we actually targeted — never a different one.
+ */
+export function requireEventReceipt(
+  raw: RawGoogleEvent,
+  operation: "create" | "update",
+  expectedId?: string,
+): NormalizedCalendarEvent {
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  if (!id) {
+    throw new GoogleCalendarError(
+      "malformed_provider_response",
+      `Google Calendar did not return an event id for ${operation}`,
+    );
+  }
+  if (expectedId !== undefined && id !== expectedId) {
+    throw new GoogleCalendarError(
+      "malformed_provider_response",
+      `Google Calendar ${operation} confirmed a different event than requested`,
+    );
+  }
+  // A cancelled event is not a live create/update result — never claim otherwise.
+  if (operation === "create" && raw.status === "cancelled") {
+    throw new GoogleCalendarError(
+      "malformed_provider_response",
+      "Google Calendar returned a cancelled event for create",
+    );
+  }
+  return normalizeGoogleEvent(raw, DEFAULT_CALENDAR_ID);
+}
+
+/**
+ * Create an event on the user's primary calendar. Returns the normalized event,
+ * but ONLY after Google confirms it with a real event id — a malformed response
+ * throws rather than resolving to a fabricated success.
+ */
 export async function createCalendarEvent(
   userId: string,
   fields: CalendarEventWriteFields,
@@ -85,7 +126,7 @@ export async function createCalendarEvent(
     { body: buildEventBody(fields) },
     fetchImpl,
   );
-  return normalizeGoogleEvent(raw, DEFAULT_CALENDAR_ID);
+  return requireEventReceipt(raw, "create");
 }
 
 /**
@@ -107,10 +148,19 @@ export async function updateCalendarEvent(
     { body: buildEventBody(fields) },
     fetchImpl,
   );
-  return normalizeGoogleEvent(raw, DEFAULT_CALENDAR_ID);
+  return requireEventReceipt(raw, "update", eventId);
 }
 
-/** Delete an event by id from the user's primary calendar. */
+/**
+ * Delete an event by id from the user's primary calendar.
+ *
+ * Success is established by Google's own response, never assumed: the client
+ * throws a classified error on any non-2xx (404 → `calendar_not_found`, 403 →
+ * scope/permission, …), so returning normally means Google answered 2xx — for a
+ * delete, a 204 No Content, which the client maps to an empty object. The caller
+ * may claim deletion on that basis and no other. There is no id to validate here,
+ * which is exactly why the target id is resolved and pinned at proposal time.
+ */
 export async function deleteCalendarEvent(
   userId: string,
   eventId: string,

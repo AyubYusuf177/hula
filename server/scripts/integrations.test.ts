@@ -23,6 +23,7 @@ import {
   type IntegrationConnectionView,
 } from "../src/integrations/connections";
 import { buildHulaSystemPrompt } from "../src/ai/prompts";
+import { ACTION_DEFINITIONS } from "../src/actions/registry";
 
 /**
  * Offline tests for Section 10 integration foundation. Everything here is PURE —
@@ -193,14 +194,45 @@ check("vault: hashScopes is deterministic and order-independent", () => {
 // --- Action policy -------------------------------------------------------
 
 check("policy: risk levels are ordered safest → most dangerous", () => {
+  // Section 17 inserts `modify` between `draft` and `write`: a reversible,
+  // non-external change to the user's own state (mark read, star, archive). It sits
+  // below `write` because nothing there can be lost or seen by anyone else.
   assert.deepEqual(ACTION_RISK_LEVELS, [
     "read",
     "draft",
+    "modify",
     "write",
     "send",
     "purchase",
     "destructive",
   ]);
+});
+
+check("policy: `modify` needs connection + scope but NOT confirmation", () => {
+  const base = { providerConnected: true, scopeGranted: true } as const;
+  // The whole point of the rung: reversible changes must not nag. Nagging for
+  // "star that email" trains users to approve prompts reflexively, which erodes the
+  // confirmations that actually protect them.
+  const ok = evaluateActionPolicy({ risk: "modify", ...base });
+  assert.equal(ok.allowed, true);
+  assert.equal(ok.needsConfirmation, false);
+
+  // It is still a real permission: connection + scope are enforced exactly as for
+  // every other rung.
+  assert.equal(
+    evaluateActionPolicy({ risk: "modify", providerConnected: false, scopeGranted: false }).reason,
+    "not_connected",
+  );
+  assert.equal(
+    evaluateActionPolicy({ risk: "modify", providerConnected: true, scopeGranted: false }).reason,
+    "scope_not_granted",
+  );
+});
+
+check("policy: `modify` sits below `write` and above `draft`", () => {
+  const i = (r: string) => ACTION_RISK_LEVELS.indexOf(r as never);
+  assert.ok(i("draft") < i("modify"), "modify is riskier than a draft");
+  assert.ok(i("modify") < i("write"), "modify is safer than a write");
 });
 
 check("policy: reads need connection AND granted scope", () => {
@@ -327,6 +359,44 @@ check("status: the safe item carries NO credential or scope fields", () => {
 });
 
 // --- Brain integration context (honest) ----------------------------------
+
+check("prompt: the Gmail capability copy matches what is actually implemented", () => {
+  // THE ROOT CAUSE of the shipped failure. The prompt said Gmail was "read, draft
+  // and send" long after starring/archiving/labelling shipped, so when a message
+  // slipped past routing the model faithfully replied "I can't star emails — that
+  // action isn't available yet". The model was not hallucinating; it was repeating
+  // a stale prompt. This pins the copy to the registry so it cannot drift again.
+  const base = buildHulaSystemPrompt({ channel: "imessage" });
+  const withGmail = buildHulaSystemPrompt({
+    channel: "imessage",
+    connectedProviders: ["Gmail"],
+  });
+
+  const implementedGmail = ACTION_DEFINITIONS.filter(
+    (a) => a.implemented && a.providerTypes.includes("gmail"),
+  ).map((a) => a.actionId);
+
+  // Every implemented Gmail action must be describable in the prompt copy.
+  const required: Record<string, RegExp> = {
+    "email.createDraft": /draft/i,
+    "email.sendDraft": /send/i,
+    "email.updateDraft": /manage drafts|edit/i,
+    "email.deleteDraft": /manage drafts|delete/i,
+    "email.modifyLabels": /star/i,
+    "email.trash": /trash/i,
+    "email.untrash": /restore/i,
+  };
+  for (const id of implementedGmail) {
+    const re = required[id];
+    assert.ok(re, `${id} is implemented but has no prompt-copy expectation — add one`);
+    assert.ok(re!.test(base), `system prompt does not mention ${id} (${re})`);
+    assert.ok(re!.test(withGmail), `connected-apps line does not mention ${id} (${re})`);
+  }
+
+  // And the prompt must forbid denying a real capability — the failure mode that
+  // produced the wrong answer.
+  assert.ok(/never tell the user that a capability listed above is unavailable/i.test(base));
+});
 
 check("prompt: no connected apps → no integration line", () => {
   const prompt = buildHulaSystemPrompt({ firstName: "Ayub" });

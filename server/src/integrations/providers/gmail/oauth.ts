@@ -11,7 +11,12 @@ import {
   type GoogleTokenResponse,
   type PkcePair,
 } from "../googleCalendar/oauth";
-import { GMAIL_COMPOSE_SCOPE, GMAIL_PROVIDER, GMAIL_READONLY_SCOPE } from "./types";
+import {
+  GMAIL_COMPOSE_SCOPE,
+  GMAIL_MODIFY_SCOPE,
+  GMAIL_PROVIDER,
+  GMAIL_READONLY_SCOPE,
+} from "./types";
 
 /**
  * Gmail OAuth helpers (Section 14 + Section 16).
@@ -24,14 +29,21 @@ import { GMAIL_COMPOSE_SCOPE, GMAIL_PROVIDER, GMAIL_READONLY_SCOPE } from "./typ
  * `buildAuthorizationUrl`, `exchangeCodeForTokens`, `refreshAccessToken`) — it
  * never reads Calendar env or touches Calendar state.
  *
- * Scopes (Section 16): `gmail.readonly` (read) PLUS `gmail.compose` (create
- * drafts + send messages/replies). `gmail.compose` is least-privilege for writes
- * — it does NOT grant delete/label/archive/modify or full-mailbox access. Scopes
- * come from `GMAIL_SCOPES` when set, else the catalog's defaults.
+ * Scopes: `gmail.readonly` (read) + `gmail.compose` (drafts + send, Section 16) +
+ * `gmail.modify` (message management, Section 17). Scopes come from `GMAIL_SCOPES`
+ * when set, else the catalog's defaults.
+ *
+ * Why `gmail.modify` is here: Google's per-method reference does NOT accept
+ * `gmail.compose` for messages.modify/trash/untrash, so marking read, starring,
+ * archiving, labelling, and trashing are impossible without it. It is ADDED, not a
+ * replacement — readonly/compose still back their own capabilities, so partial
+ * consent degrades one capability rather than all of them.
  *
  * Hard rules:
- *   - No scope beyond `gmail.readonly` + `gmail.compose` is ever requested (never
- *     gmail.modify or the full-mailbox scope).
+ *   - `https://mail.google.com/` is NEVER requested. It is the only scope that adds
+ *     permanent deletion bypassing the trash, and Hula implements no such action.
+ *   - Each scope is checked INDEPENDENTLY by membership (`hasGmail*Scope`), so a
+ *     capability is claimed only when its own scope was actually granted.
  *   - Client secret and tokens are NEVER logged or put into a thrown message.
  *   - Missing config surfaces as `GoogleOAuthConfigError`, never a crash.
  */
@@ -66,8 +78,12 @@ export function isGmailOAuthConfigured(): boolean {
  *
  * Uses the SHARED Google client id/secret but Gmail's OWN redirect URI
  * (`GMAIL_OAUTH_REDIRECT_URI`). Scopes come from `GMAIL_SCOPES` (space-separated)
- * or fall back to the catalog's least-privilege `gmail.readonly`. This never
- * returns a write scope — the consent screen the user approves is read-only.
+ * or fall back to the catalog's defaults.
+ *
+ * NOTE: when `GMAIL_SCOPES` is set it WINS outright — the catalog default is not
+ * merged in. So a deployment that pins `GMAIL_SCOPES` must add `gmail.modify` there
+ * for Section 17's message management to be requested at all; otherwise those
+ * actions correctly (and permanently) report reconnect-required.
  */
 export function getGmailOAuthConfig(): GoogleOAuthConfig {
   const clientId = env.GOOGLE_OAUTH_CLIENT_ID?.trim();
@@ -111,4 +127,18 @@ export function hasGmailReadonlyScope(grantedScopes: readonly string[]): boolean
  */
 export function hasGmailComposeScope(grantedScopes: readonly string[]): boolean {
   return grantedScopes.some((s) => s.trim() === GMAIL_COMPOSE_SCOPE);
+}
+
+/**
+ * PURE: verify the Gmail MODIFY scope was granted, by MEMBERSHIP. This is the scope
+ * Section 17's message-management actions require (mark read/unread, star, archive,
+ * label, trash, untrash). A connection lacking it — every pre-Section-17 grant, and
+ * any user who declined it at partial consent — must be reconnected before those
+ * actions can run, and is told so honestly rather than silently failing.
+ *
+ * Checked INDEPENDENTLY of readonly/compose: partial consent is real, and a user who
+ * grants read + compose but not modify must keep search, drafts, and sending.
+ */
+export function hasGmailModifyScope(grantedScopes: readonly string[]): boolean {
+  return grantedScopes.some((s) => s.trim() === GMAIL_MODIFY_SCOPE);
 }

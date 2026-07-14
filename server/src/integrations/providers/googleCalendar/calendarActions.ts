@@ -2,14 +2,9 @@ import { getConnectionForUserProvider } from "../../connections";
 import { getUserTimezone } from "../../../reminders/reminders";
 import { wallTimeToUtc } from "../../../reminders/parse";
 import { logger } from "../../../utils/logger";
+import { createActionProposal } from "../../../actions/proposals";
 import { GoogleCalendarError, isReconnectReason } from "./client";
-import {
-  createCalendarEvent,
-  deleteCalendarEvent,
-  findCalendarEvents,
-  updateCalendarEvent,
-  type CalendarEventWriteFields,
-} from "./calendarWrites";
+import { findCalendarEvents } from "./calendarWrites";
 import {
   extractCalendarAction,
   type CalendarAction,
@@ -22,14 +17,26 @@ import {
 } from "./types";
 
 /**
- * Calendar WRITE routing (Section 15) — create / update / delete via iMessage.
+ * Calendar WRITE routing (Sections 15 + 17) — create / update / delete via iMessage.
  *
- * Mirrors the read-question handler: a deterministic prefilter, then a strictly
- * validated model extraction, then a DETERMINISTIC backend that resolves the real
- * event, guards safety (never write in the past, never on ambiguous or recurring
- * matches), performs the write through the provider layer, and confirms from the
- * ACTUAL Google response. The model never touches Google. Never throws — every
- * failure degrades to an honest reply.
+ * A deterministic prefilter, then a strictly validated model extraction, then a
+ * DETERMINISTIC backend that resolves the real event and guards safety (never
+ * write in the past, never on ambiguous or recurring matches). The model never
+ * touches Google. Never throws — every failure degrades to an honest reply.
+ *
+ * Section 17 moved the WRITE itself out of this file. Where Section 15 called the
+ * provider inline, this now ends by creating a durable Section 12 proposal holding
+ * the fully-resolved event id and ISO instants, and replies with a preview. Only a
+ * subsequent natural confirmation ("yh", "do it") executes it — through the same
+ * proposal → confirmation → executor → validated-receipt path Gmail sends use. That
+ * buys three things this file cannot provide on its own: a user-visible preview
+ * before anything mutates, durable idempotency across restarts and duplicate
+ * webhook deliveries (the atomic `proposed → confirmed` claim can only win once),
+ * and a single place where provider receipts are validated.
+ *
+ * Everything resolved here is resolved ONCE, at proposal time, and the executor
+ * replays it verbatim — so the event the user saw previewed is exactly the event
+ * that gets written.
  */
 
 /** Default event length when the user gives a start but no duration. */
@@ -274,6 +281,52 @@ export function formatDeleted(event: NormalizedCalendarEvent, tz: string | undef
   return `Deleted — “${titleOf(event)}”${when ? ` on ${when}` : ""}.`;
 }
 
+// --- Preview formatting (PURE) -------------------------------------------
+
+/**
+ * PURE: the concise preview shown BEFORE a write runs (Section 17). Each ends with
+ * a clear ask so the user knows a confirmation is required and nothing has happened
+ * yet — the wording must never imply the change is already made.
+ */
+export function formatCreatePreview(
+  title: string,
+  startIso: string,
+  endIso: string,
+  tz: string | undefined,
+): string {
+  const when = formatWhen(
+    { start: startIso, end: endIso } as NormalizedCalendarEvent,
+    tz,
+  );
+  return `I’ll schedule “${title}” for ${when}. Want me to go ahead?`;
+}
+
+export function formatUpdatePreview(
+  event: NormalizedCalendarEvent,
+  changes: { newTitle?: string; newLocation?: string; startIso?: string; endIso?: string },
+  tz: string | undefined,
+): string {
+  const lines: string[] = [];
+  if (changes.newTitle) lines.push(`• Rename to “${changes.newTitle}”`);
+  if (changes.newLocation) lines.push(`• Location: ${changes.newLocation}`);
+  if (changes.startIso && changes.endIso) {
+    const when = formatWhen(
+      { start: changes.startIso, end: changes.endIso } as NormalizedCalendarEvent,
+      tz,
+    );
+    lines.push(`• Move to ${when}`);
+  }
+  return `I’ll update “${titleOf(event)}”:\n${lines.join("\n")}\nWant me to go ahead?`;
+}
+
+export function formatDeletePreview(
+  event: NormalizedCalendarEvent,
+  tz: string | undefined,
+): string {
+  const when = formatWhen(event, tz);
+  return `I’ll delete “${titleOf(event)}”${when ? ` (${when})` : ""}. This can’t be undone — want me to go ahead?`;
+}
+
 export function formatAmbiguous(matches: NormalizedCalendarEvent[], tz: string | undefined): string {
   const lines = matches.slice(0, MAX_AMBIGUOUS_SHOWN).map((e, i) => {
     const at = clock(e.start, tz);
@@ -308,10 +361,12 @@ export interface CalendarWriteDeps {
     generate?: TextGenerator;
   }) => Promise<CalendarAction | null>;
   generate?: TextGenerator;
-  create?: typeof createCalendarEvent;
-  update?: typeof updateCalendarEvent;
-  remove?: typeof deleteCalendarEvent;
   find?: typeof findCalendarEvents;
+  /**
+   * Creates the durable proposal a confirmation later executes. Injected so tests
+   * exercise the full resolve → preview → propose path with NO database.
+   */
+  propose?: typeof createActionProposal;
   now?: Date;
 }
 
@@ -411,7 +466,7 @@ async function runCreate(
   now: Date,
   deps: CalendarWriteDeps,
 ): Promise<CalendarWriteResult> {
-  const create = deps.create ?? createCalendarEvent;
+  const propose = deps.propose ?? createActionProposal;
 
   const title = (action.title ?? "").trim();
   if (!title) return { handled: true, action: "create", reply: CALENDAR_WRITE_REPLIES.needTitle };
@@ -430,17 +485,32 @@ async function runCreate(
   }
   const durationMin = action.durationMinutes ?? DEFAULT_DURATION_MINUTES;
   const end = new Date(start.getTime() + durationMin * 60_000);
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
 
-  const fields: CalendarEventWriteFields = {
-    summary: title,
-    start: { dateTime: start.toISOString(), timeZone: tz },
-    end: { dateTime: end.toISOString(), timeZone: tz },
+  // Nothing is written here. The proposal carries the exact instants previewed
+  // below, so a later confirmation replays them without re-parsing the request.
+  await propose(userId, {
+    provider: GOOGLE_CALENDAR_PROVIDER,
+    actionId: "calendar.createEvent",
+    riskLevel: "write",
+    confirmationRequired: true,
+    input: {
+      title,
+      startIso,
+      endIso,
+      timezone: tz,
+      ...(action.location ? { location: action.location } : {}),
+      ...(action.description ? { description: action.description } : {}),
+    },
+    previewText: formatCreatePreview(title, startIso, endIso, tz),
+  });
+
+  return {
+    handled: true,
+    action: "create",
+    reply: formatCreatePreview(title, startIso, endIso, tz),
   };
-  if (action.location) fields.location = action.location;
-  if (action.description) fields.description = action.description;
-
-  const event = await create(userId, fields);
-  return { handled: true, action: "create", reply: formatCreated(event, tz) };
 }
 
 /** Resolve the single target event for an update/delete, or a clarify/None reply. */
@@ -479,18 +549,18 @@ async function runUpdate(
   tz: string | undefined,
   deps: CalendarWriteDeps,
 ): Promise<CalendarWriteResult> {
-  const update = deps.update ?? updateCalendarEvent;
+  const propose = deps.propose ?? createActionProposal;
 
   const target = await resolveTarget(userId, action, tz, deps);
   if (target.kind === "reply") return { handled: true, action: "update", reply: target.reply };
   const event = target.event;
 
-  const fields: CalendarEventWriteFields = {};
+  const changes: { newTitle?: string; newLocation?: string; startIso?: string; endIso?: string } = {};
   let renamedOnly = true;
 
-  if (action.newTitle && action.newTitle.trim()) fields.summary = action.newTitle.trim();
+  if (action.newTitle && action.newTitle.trim()) changes.newTitle = action.newTitle.trim();
   if (action.newLocation && action.newLocation.trim()) {
-    fields.location = action.newLocation.trim();
+    changes.newLocation = action.newLocation.trim();
     renamedOnly = false;
   }
 
@@ -513,16 +583,27 @@ async function runUpdate(
       event.start && event.end ? new Date(event.end).getTime() - new Date(event.start).getTime() : NaN;
     const durationMs = Number.isFinite(origMs) && origMs > 0 ? origMs : DEFAULT_DURATION_MINUTES * 60_000;
     const newEnd = new Date(newStart.getTime() + durationMs);
-    fields.start = { dateTime: newStart.toISOString(), timeZone: tz };
-    fields.end = { dateTime: newEnd.toISOString(), timeZone: tz };
+    changes.startIso = newStart.toISOString();
+    changes.endIso = newEnd.toISOString();
   }
 
-  if (Object.keys(fields).length === 0) {
+  if (Object.keys(changes).length === 0) {
     return { handled: true, action: "update", reply: CALENDAR_WRITE_REPLIES.needChange };
   }
 
-  const updated = await update(userId, event.id, fields);
-  return { handled: true, action: "update", reply: formatUpdated(updated, tz, renamedOnly) };
+  const preview = formatUpdatePreview(event, changes, tz);
+  await propose(userId, {
+    provider: GOOGLE_CALENDAR_PROVIDER,
+    actionId: "calendar.updateEvent",
+    riskLevel: "write",
+    confirmationRequired: true,
+    // The resolved event id is captured here, so the confirmation can never land
+    // on a different event than the one previewed.
+    input: { eventId: event.id, timezone: tz, renamedOnly, ...changes },
+    previewText: preview,
+  });
+
+  return { handled: true, action: "update", reply: preview };
 }
 
 async function runDelete(
@@ -531,13 +612,29 @@ async function runDelete(
   tz: string | undefined,
   deps: CalendarWriteDeps,
 ): Promise<CalendarWriteResult> {
-  const remove = deps.remove ?? deleteCalendarEvent;
+  const propose = deps.propose ?? createActionProposal;
 
   const target = await resolveTarget(userId, action, tz, deps);
   if (target.kind === "reply") return { handled: true, action: "delete", reply: target.reply };
   const event = target.event;
 
-  // Capture the details BEFORE deleting so the confirmation is accurate.
-  await remove(userId, event.id);
-  return { handled: true, action: "delete", reply: formatDeleted(event, tz) };
+  // Capture the details now: once the event is deleted Google returns 204 with no
+  // body, so these are the only accurate details the confirmation can report.
+  const preview = formatDeletePreview(event, tz);
+  await propose(userId, {
+    provider: GOOGLE_CALENDAR_PROVIDER,
+    actionId: "calendar.cancelEvent",
+    riskLevel: "write",
+    confirmationRequired: true,
+    input: {
+      eventId: event.id,
+      title: event.summary ?? "",
+      startIso: event.start ?? "",
+      endIso: event.end ?? "",
+      timezone: tz,
+    },
+    previewText: preview,
+  });
+
+  return { handled: true, action: "delete", reply: preview };
 }

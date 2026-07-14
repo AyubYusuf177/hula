@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 
 import {
   buildEventBody,
-  type CalendarEventWriteFields,
+  requireEventReceipt,
 } from "../src/integrations/providers/googleCalendar/calendarWrites";
+import { GoogleCalendarError } from "../src/integrations/providers/googleCalendar/client";
 import {
   CalendarActionSchema,
   buildExtractionPrompt,
@@ -27,12 +28,18 @@ import {
 } from "../src/integrations/providers/googleCalendar/calendarActions";
 import type { CalendarAction } from "../src/integrations/providers/googleCalendar/calendarActionExtract";
 import type { NormalizedCalendarEvent } from "../src/integrations/providers/googleCalendar/types";
+import type { CreateProposalInput } from "../src/actions/proposals";
 
 /**
- * Offline tests for Section 15 Google Calendar WRITES. Everything here is PURE or
- * uses injected fakes — NO database, NO real Google API, NO Anthropic. Google
- * writes are mocked via injected create/update/find/remove deps, so no test ever
- * touches a real calendar. Run with: `npm test`.
+ * Offline tests for Google Calendar WRITES (Sections 15 + 17). Everything here is
+ * PURE or uses injected fakes — NO database, NO real Google API, NO Anthropic.
+ *
+ * Section 17 moved the actual Google write behind the proposal → confirmation →
+ * executor path, so these tests assert the RESOLVE + PREVIEW + PROPOSE half:
+ * the right event is resolved, the safety guards (past / ambiguous / recurring /
+ * read-only) still fire, and — critically — nothing is proposed when a guard fires.
+ * The provider write itself is covered in `actions.test.ts`. No test can touch a
+ * real calendar: `handleCalendarWrite` no longer has a provider write to call.
  */
 
 let passed = 0;
@@ -75,32 +82,43 @@ function ev(
   };
 }
 
-/** A write-capable, connected calendar with all Google ops as controllable fakes. */
+/**
+ * A write-capable, connected calendar whose PROPOSAL store is a controllable fake.
+ *
+ * Section 17: `handleCalendarWrite` no longer performs any Google write — it
+ * resolves the target, previews it, and creates a proposal. So the thing to assert
+ * is what got PROPOSED (and, just as importantly, that nothing was proposed when a
+ * safety guard fired). The executor's provider adapters are tested separately in
+ * `actions.test.ts`.
+ */
 function makeDeps(over: Partial<CalendarWriteDeps> & { capability?: WriteCapability } = {}): {
   deps: CalendarWriteDeps;
-  calls: { created: unknown[]; updated: unknown[]; removed: string[]; found: number };
+  calls: { proposed: CreateProposalInput[]; found: number };
 } {
-  const calls = { created: [] as unknown[], updated: [] as unknown[], removed: [] as string[], found: 0 };
+  const calls = { proposed: [] as CreateProposalInput[], found: 0 };
   const deps: CalendarWriteDeps = {
     now: NOW,
     getTimezone: async () => TZ,
     writeCapability: async () => over.capability ?? "connected_write",
     // Default extractor is overridden per test; default returns not_calendar_write.
     extract: over.extract ?? (async () => ({ action: "not_calendar_write" }) as CalendarAction),
-    create: async (_u, fields) => {
-      calls.created.push(fields);
-      const start = (fields.start?.dateTime as string) ?? null;
-      const end = (fields.end?.dateTime as string) ?? null;
-      return ev("new_1", fields.summary ?? "", start, end);
-    },
-    update: async (_u, id, fields) => {
-      calls.updated.push({ id, fields });
-      const start = (fields.start?.dateTime as string) ?? "2026-07-14T18:00:00.000Z";
-      const end = (fields.end?.dateTime as string) ?? "2026-07-14T19:00:00.000Z";
-      return ev(id, fields.summary ?? "Lunch with Adam", start, end);
-    },
-    remove: async (_u, id) => {
-      calls.removed.push(id);
+    propose: async (_userId, input) => {
+      calls.proposed.push(input);
+      return {
+        id: "prop_fake",
+        provider: input.provider ?? null,
+        actionId: input.actionId,
+        status: "proposed",
+        riskLevel: input.riskLevel,
+        confirmationRequired: input.confirmationRequired ?? true,
+        previewText: input.previewText,
+        input: input.input ?? null,
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        confirmedAt: null,
+        rejectedAt: null,
+        executedAt: null,
+        createdAt: new Date().toISOString(),
+      };
     },
     find: async () => {
       calls.found += 1;
@@ -229,17 +247,104 @@ check("format: created / updated / deleted / ambiguous read naturally", () => {
   assert.ok(/from 1:00/.test(formatWhen(e, TZ)));
 });
 
+// --- Request body + provider receipt validation (PURE) --------------------
+
+check("buildEventBody: emits only whitelisted keys and drops undefined ones", () => {
+  // PATCH semantics: a field the user didn't ask to change must be ABSENT, not
+  // null — an emitted null would clear it on the real event.
+  const body = buildEventBody({ summary: "Gym" });
+  assert.deepEqual(body, { summary: "Gym" });
+  assert.equal("location" in body, false);
+  assert.equal("start" in body, false);
+
+  const full = buildEventBody({
+    summary: "Lunch",
+    location: "Cafe",
+    description: "catch up",
+    start: { dateTime: "2026-07-14T17:00:00.000Z", timeZone: TZ },
+    end: { dateTime: "2026-07-14T18:00:00.000Z", timeZone: TZ },
+  });
+  assert.deepEqual(Object.keys(full).sort(), [
+    "description",
+    "end",
+    "location",
+    "start",
+    "summary",
+  ]);
+  assert.deepEqual(full.start, { dateTime: "2026-07-14T17:00:00.000Z", timeZone: TZ });
+});
+
+check("receipt: a create is only a success when Google returns a real event id", () => {
+  const ok = requireEventReceipt(
+    { id: "evt_1", summary: "Gym", start: { dateTime: "2026-07-14T17:00:00Z" } },
+    "create",
+  );
+  assert.equal(ok.id, "evt_1");
+
+  // A 2xx with no id is NOT evidence the event exists — it must never be
+  // formatted as a success.
+  assert.throws(
+    () => requireEventReceipt({ summary: "Gym" }, "create"),
+    (err: unknown) =>
+      err instanceof GoogleCalendarError && err.reason === "malformed_provider_response",
+  );
+  assert.throws(
+    () => requireEventReceipt({ id: "   " }, "create"),
+    (err: unknown) => err instanceof GoogleCalendarError,
+  );
+});
+
+check("receipt: a create that comes back cancelled is not a success", () => {
+  assert.throws(
+    () => requireEventReceipt({ id: "evt_1", status: "cancelled" }, "create"),
+    (err: unknown) =>
+      err instanceof GoogleCalendarError && err.reason === "malformed_provider_response",
+  );
+});
+
+check("receipt: an update must confirm the event we actually targeted", () => {
+  const ok = requireEventReceipt({ id: "evt_lunch" }, "update", "evt_lunch");
+  assert.equal(ok.id, "evt_lunch");
+
+  // Google confirming a DIFFERENT event than requested must never be reported as
+  // the requested update succeeding.
+  assert.throws(
+    () => requireEventReceipt({ id: "evt_other" }, "update", "evt_lunch"),
+    (err: unknown) =>
+      err instanceof GoogleCalendarError && err.reason === "malformed_provider_response",
+  );
+});
+
 // --- CREATE flow ---------------------------------------------------------
 
-asyncCheck("create: valid request creates the event and confirms from Google", async () => {
+/** The single proposal a flow created (asserts exactly one was made). */
+function onlyProposal(calls: { proposed: CreateProposalInput[] }): CreateProposalInput {
+  assert.equal(calls.proposed.length, 1, "expected exactly one proposal");
+  return calls.proposed[0]!;
+}
+
+/** The redacted input a proposal carries, as the executor will read it back. */
+function proposalInput(calls: { proposed: CreateProposalInput[] }): Record<string, unknown> {
+  return (onlyProposal(calls).input ?? {}) as Record<string, unknown>;
+}
+
+asyncCheck("create: valid request PREVIEWS and proposes, but writes nothing yet", async () => {
   const { deps, calls } = makeDeps({
     extract: fixedExtract({ action: "create", title: "Lunch with Adam", date: "2026-07-14", time: "13:00" }),
   });
   const r = await handleCalendarWrite("u", "schedule lunch with Adam tomorrow at 1pm", deps);
   assert.equal(r.handled, true);
   assert.equal(r.action, "create");
-  assert.ok(/Done — “Lunch with Adam” is scheduled/.test(r.reply ?? ""));
-  assert.equal(calls.created.length, 1);
+  // The reply must read as an intention + an ask, never as a completed write.
+  assert.ok(/I’ll schedule “Lunch with Adam”/.test(r.reply ?? ""), r.reply);
+  assert.ok(/want me to go ahead\?/i.test(r.reply ?? ""), r.reply);
+  assert.ok(!/Done —|scheduled\.$/.test(r.reply ?? ""), "must not claim the event exists yet");
+
+  const p = onlyProposal(calls);
+  assert.equal(p.actionId, "calendar.createEvent");
+  assert.equal(p.provider, "google_calendar");
+  assert.equal(p.confirmationRequired, true);
+  assert.equal(p.riskLevel, "write");
 });
 
 asyncCheck("create: default 60-minute duration when none is given", async () => {
@@ -247,10 +352,10 @@ asyncCheck("create: default 60-minute duration when none is given", async () => 
     extract: fixedExtract({ action: "create", title: "Sync", date: "2026-07-14", time: "15:00" }),
   });
   await handleCalendarWrite("u", "schedule a sync tomorrow at 3pm", deps);
-  const fields = calls.created[0] as CalendarEventWriteFields;
-  const start = new Date(fields.start!.dateTime).getTime();
-  const end = new Date(fields.end!.dateTime).getTime();
-  assert.equal((end - start) / 60000, 60);
+  const input = proposalInput(calls);
+  const mins =
+    (new Date(input.endIso as string).getTime() - new Date(input.startIso as string).getTime()) / 60000;
+  assert.equal(mins, 60);
 });
 
 asyncCheck("create: custom duration is honored", async () => {
@@ -258,185 +363,186 @@ asyncCheck("create: custom duration is honored", async () => {
     extract: fixedExtract({ action: "create", title: "Hula test", date: "2026-07-14", time: "15:00", durationMinutes: 30 }),
   });
   await handleCalendarWrite("u", "schedule a Hula test tomorrow at 3pm for 30 minutes", deps);
-  const fields = calls.created[0] as CalendarEventWriteFields;
-  const mins = (new Date(fields.end!.dateTime).getTime() - new Date(fields.start!.dateTime).getTime()) / 60000;
+  const input = proposalInput(calls);
+  const mins =
+    (new Date(input.endIso as string).getTime() - new Date(input.startIso as string).getTime()) / 60000;
   assert.equal(mins, 30);
 });
 
-asyncCheck("create: optional location is passed through", async () => {
+asyncCheck("create: optional location is passed through to the proposal", async () => {
   const { deps, calls } = makeDeps({
     extract: fixedExtract({ action: "create", title: "Coffee", date: "2026-07-14", time: "10:00", location: "Blue Bottle" }),
   });
   await handleCalendarWrite("u", "schedule coffee tomorrow at 10am at Blue Bottle", deps);
-  assert.equal((calls.created[0] as CalendarEventWriteFields).location, "Blue Bottle");
+  assert.equal(proposalInput(calls).location, "Blue Bottle");
 });
 
-asyncCheck("create: missing time asks for clarification (no write)", async () => {
+asyncCheck("create: the proposal carries the EXACT instants shown in the preview", async () => {
+  // The executor replays these verbatim, so a drift between preview and stored
+  // input would mean the user confirms one thing and Hula writes another.
+  const { deps, calls } = makeDeps({
+    extract: fixedExtract({ action: "create", title: "Lunch", date: "2026-07-14", time: "13:00" }),
+  });
+  const r = await handleCalendarWrite("u", "schedule lunch tomorrow at 1pm", deps);
+  const input = proposalInput(calls);
+  assert.equal(input.startIso, "2026-07-14T17:00:00.000Z", "1pm New York == 17:00Z");
+  assert.equal(input.timezone, TZ);
+  // The preview text stored on the proposal is what the user was actually shown.
+  assert.equal(onlyProposal(calls).previewText, r.reply);
+});
+
+asyncCheck("create: missing time asks for clarification (nothing proposed)", async () => {
   const { deps, calls } = makeDeps({
     extract: fixedExtract({ action: "create", title: "Lunch with Adam", date: "2026-07-14" }),
   });
   const r = await handleCalendarWrite("u", "schedule lunch with Adam tomorrow", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.needTime);
-  assert.equal(calls.created.length, 0);
+  assert.equal(calls.proposed.length, 0);
 });
 
-asyncCheck("create: missing title asks for clarification (no write)", async () => {
+asyncCheck("create: missing title asks for clarification (nothing proposed)", async () => {
   const { deps, calls } = makeDeps({
     extract: fixedExtract({ action: "create", date: "2026-07-14", time: "13:00" }),
   });
   const r = await handleCalendarWrite("u", "schedule something tomorrow at 1pm", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.needTitle);
-  assert.equal(calls.created.length, 0);
+  assert.equal(calls.proposed.length, 0);
 });
 
-asyncCheck("create: never schedules in the past", async () => {
+asyncCheck("create: never proposes an event in the past", async () => {
   const { deps, calls } = makeDeps({
     extract: fixedExtract({ action: "create", title: "Past thing", date: "2026-07-10", time: "09:00" }),
   });
   const r = await handleCalendarWrite("u", "schedule a call at 9am on Friday", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.inPast);
-  assert.equal(calls.created.length, 0);
-});
-
-asyncCheck("create: a Google failure yields an honest reply, not a false success", async () => {
-  const { deps } = makeDeps({
-    extract: fixedExtract({ action: "create", title: "X", date: "2026-07-14", time: "13:00" }),
-    create: async () => {
-      const { GoogleCalendarError } = await import("../src/integrations/providers/googleCalendar/client");
-      throw new GoogleCalendarError("provider_unavailable", "boom", 503);
-    },
-  });
-  const r = await handleCalendarWrite("u", "schedule X tomorrow at 1pm", deps);
-  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.unavailable);
-  assert.ok(!/Done —/.test(r.reply ?? ""));
+  assert.equal(calls.proposed.length, 0);
 });
 
 // --- UPDATE flow ---------------------------------------------------------
 
 const oneLunch = [ev("evt_lunch", "Lunch with Adam", "2026-07-14T13:00:00-04:00", "2026-07-14T14:00:00-04:00")];
 
-asyncCheck("update: reschedules and preserves the original duration", async () => {
+asyncCheck("update: reschedule previews the move and preserves the original duration", async () => {
   const { deps, calls } = makeDeps({
     find: async () => oneLunch,
     extract: fixedExtract({ action: "update", title: "Lunch with Adam", date: "2026-07-14", newTime: "14:00" }),
   });
-  const r = await handleCalendarWrite("u", "move lunch with Adam tomorrow to 2pm", deps);
+  const r = await handleCalendarWrite("u", "move lunch with Adam to 2pm", deps);
   assert.equal(r.action, "update");
-  assert.ok(/^Updated — “Lunch with Adam” is now scheduled/.test(r.reply ?? ""));
-  const { id, fields } = calls.updated[0] as { id: string; fields: CalendarEventWriteFields };
-  assert.equal(id, "evt_lunch");
-  const mins = (new Date(fields.end!.dateTime).getTime() - new Date(fields.start!.dateTime).getTime()) / 60000;
-  assert.equal(mins, 60, "original 60-min duration preserved");
+  assert.ok(/I’ll update “Lunch with Adam”/.test(r.reply ?? ""), r.reply);
+  assert.ok(/want me to go ahead\?/i.test(r.reply ?? ""), r.reply);
+  assert.ok(!/^Updated —/.test(r.reply ?? ""), "must not claim the update happened");
+
+  const p = onlyProposal(calls);
+  assert.equal(p.actionId, "calendar.updateEvent");
+  const input = (p.input ?? {}) as Record<string, unknown>;
+  // The RESOLVED event id is captured now, so confirmation can't drift onto another.
+  assert.equal(input.eventId, "evt_lunch");
+  const mins =
+    (new Date(input.endIso as string).getTime() - new Date(input.startIso as string).getTime()) / 60000;
+  assert.equal(mins, 60, "original 1h duration must be preserved");
 });
 
 asyncCheck("update: title-only change reads as a rename and doesn't touch time", async () => {
   const { deps, calls } = makeDeps({
     find: async () => oneLunch,
-    extract: fixedExtract({ action: "update", title: "Lunch with Adam", date: "2026-07-14", newTitle: "Project Planning" }),
+    extract: fixedExtract({ action: "update", title: "Lunch with Adam", date: "2026-07-14", newTitle: "Lunch with Adam B" }),
   });
-  const r = await handleCalendarWrite("u", "rename lunch with Adam to Project Planning", deps);
-  const { fields } = calls.updated[0] as { fields: CalendarEventWriteFields };
-  assert.equal(fields.summary, "Project Planning");
-  assert.equal(fields.start, undefined, "no time change on a pure rename");
-  assert.ok(/renamed to “Project Planning”/.test(r.reply ?? ""));
+  await handleCalendarWrite("u", "rename lunch with Adam to Lunch with Adam B", deps);
+  const input = proposalInput(calls);
+  assert.equal(input.newTitle, "Lunch with Adam B");
+  assert.equal(input.renamedOnly, true);
+  assert.equal(input.startIso, undefined, "a rename must not reschedule");
+  assert.equal(input.endIso, undefined, "a rename must not reschedule");
 });
 
-asyncCheck("update: zero matches -> not found (no write)", async () => {
+asyncCheck("update: zero matches -> not found (nothing proposed)", async () => {
   const { deps, calls } = makeDeps({
     find: async () => [],
     extract: fixedExtract({ action: "update", title: "Lunch with Adam", date: "2026-07-14", newTime: "14:00" }),
   });
   const r = await handleCalendarWrite("u", "move lunch with Adam to 2pm", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.notFound);
-  assert.equal(calls.updated.length, 0);
+  assert.equal(calls.proposed.length, 0);
 });
 
-asyncCheck("update: multiple matches -> clarify (no write)", async () => {
-  const two = [
-    ev("a", "Lunch with Adam", "2026-07-14T13:00:00-04:00", "2026-07-14T14:00:00-04:00"),
-    ev("b", "Lunch with Adam", "2026-07-14T17:00:00-04:00", "2026-07-14T18:00:00-04:00"),
-  ];
+asyncCheck("update: multiple matches -> clarify (nothing proposed)", async () => {
   const { deps, calls } = makeDeps({
-    find: async () => two,
-    extract: fixedExtract({ action: "update", title: "Lunch with Adam", date: "2026-07-14", newTime: "15:00" }),
-  });
-  const r = await handleCalendarWrite("u", "move lunch with Adam to 3pm", deps);
-  assert.ok(/Which one did you mean/.test(r.reply ?? ""));
-  assert.equal(calls.updated.length, 0, "ambiguity must never write");
-});
-
-asyncCheck("update: Google failure is surfaced honestly", async () => {
-  const { deps } = makeDeps({
-    find: async () => oneLunch,
+    find: async () => [
+      ev("a", "Lunch with Adam", "2026-07-14T13:00:00-04:00", "2026-07-14T14:00:00-04:00"),
+      ev("b", "Lunch with Adam", "2026-07-14T17:00:00-04:00", "2026-07-14T18:00:00-04:00"),
+    ],
     extract: fixedExtract({ action: "update", title: "Lunch with Adam", date: "2026-07-14", newTime: "14:00" }),
-    update: async () => {
-      const { GoogleCalendarError } = await import("../src/integrations/providers/googleCalendar/client");
-      throw new GoogleCalendarError("provider_unavailable", "boom", 503);
-    },
   });
   const r = await handleCalendarWrite("u", "move lunch with Adam to 2pm", deps);
-  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.unavailable);
+  assert.ok(/Which one did you mean/.test(r.reply ?? ""));
+  assert.equal(calls.proposed.length, 0, "an ambiguous target must never be proposed");
+});
+
+asyncCheck("update: a recurring match asks for clarification (nothing proposed)", async () => {
+  const recurring = ev("inst_1", "Standup", "2026-07-14T13:00:00-04:00", "2026-07-14T13:15:00-04:00");
+  const { deps, calls } = makeDeps({
+    find: async () => [{ ...recurring, recurringEventId: "series_1" }],
+    extract: fixedExtract({ action: "update", title: "Standup", date: "2026-07-14", newTime: "14:00" }),
+  });
+  const r = await handleCalendarWrite("u", "move standup to 2pm", deps);
+  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.recurring);
+  assert.equal(calls.proposed.length, 0, "a recurring series must never be proposed");
 });
 
 // --- DELETE flow ---------------------------------------------------------
 
-asyncCheck("delete: single match is deleted and confirmed from captured details", async () => {
+asyncCheck("delete: single match previews the deletion from captured details", async () => {
   const { deps, calls } = makeDeps({
     find: async () => oneLunch,
     extract: fixedExtract({ action: "delete", title: "Lunch with Adam", date: "2026-07-14" }),
   });
   const r = await handleCalendarWrite("u", "delete lunch with Adam tomorrow", deps);
   assert.equal(r.action, "delete");
-  assert.deepEqual(calls.removed, ["evt_lunch"]);
-  assert.ok(/^Deleted — “Lunch with Adam” on Tuesday at 1:00/.test(r.reply ?? ""));
+  assert.ok(/I’ll delete “Lunch with Adam”/.test(r.reply ?? ""), r.reply);
+  assert.ok(/can’t be undone/i.test(r.reply ?? ""), "a destructive preview must say so");
+  assert.ok(!/^Deleted —/.test(r.reply ?? ""), "must not claim the deletion happened");
+
+  const p = onlyProposal(calls);
+  assert.equal(p.actionId, "calendar.cancelEvent");
+  const input = (p.input ?? {}) as Record<string, unknown>;
+  assert.equal(input.eventId, "evt_lunch");
+  // Captured now because a deleted event returns 204 with no body to read back.
+  assert.equal(input.title, "Lunch with Adam");
 });
 
-asyncCheck("delete: zero matches -> not found (no delete)", async () => {
+asyncCheck("delete: zero matches -> not found (nothing proposed)", async () => {
   const { deps, calls } = makeDeps({
     find: async () => [],
     extract: fixedExtract({ action: "delete", title: "Lunch with Adam", date: "2026-07-14" }),
   });
   const r = await handleCalendarWrite("u", "delete lunch with Adam tomorrow", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.notFound);
-  assert.equal(calls.removed.length, 0);
+  assert.equal(calls.proposed.length, 0);
 });
 
-asyncCheck("delete: multiple matches -> clarify (no delete)", async () => {
-  const two = [
-    ev("a", "Lunch with Adam", "2026-07-14T13:00:00-04:00", "2026-07-14T14:00:00-04:00"),
-    ev("b", "Lunch with Adam", "2026-07-14T17:00:00-04:00", "2026-07-14T18:00:00-04:00"),
-  ];
+asyncCheck("delete: multiple matches -> clarify (nothing proposed)", async () => {
   const { deps, calls } = makeDeps({
-    find: async () => two,
+    find: async () => [
+      ev("a", "Lunch with Adam", "2026-07-14T13:00:00-04:00", "2026-07-14T14:00:00-04:00"),
+      ev("b", "Lunch with Adam", "2026-07-14T17:00:00-04:00", "2026-07-14T18:00:00-04:00"),
+    ],
     extract: fixedExtract({ action: "delete", title: "Lunch with Adam", date: "2026-07-14" }),
   });
   const r = await handleCalendarWrite("u", "delete lunch with Adam tomorrow", deps);
   assert.ok(/Which one did you mean/.test(r.reply ?? ""));
-  assert.equal(calls.removed.length, 0);
+  assert.equal(calls.proposed.length, 0, "an ambiguous deletion must never be proposed");
 });
 
 asyncCheck("delete: a recurring match asks for clarification (never touches the series)", async () => {
-  const recurring = [ev("inst_1", "Standup", "2026-07-14T09:00:00-04:00", "2026-07-14T09:15:00-04:00", "series_1")];
+  const recurring = ev("inst_1", "Standup", "2026-07-14T13:00:00-04:00", "2026-07-14T13:15:00-04:00");
   const { deps, calls } = makeDeps({
-    find: async () => recurring,
+    find: async () => [{ ...recurring, recurringEventId: "series_1" }],
     extract: fixedExtract({ action: "delete", title: "Standup", date: "2026-07-14" }),
   });
-  const r = await handleCalendarWrite("u", "delete standup tomorrow", deps);
+  const r = await handleCalendarWrite("u", "cancel standup tomorrow", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.recurring);
-  assert.equal(calls.removed.length, 0);
-});
-
-asyncCheck("delete: Google failure is surfaced honestly", async () => {
-  const { deps } = makeDeps({
-    find: async () => oneLunch,
-    extract: fixedExtract({ action: "delete", title: "Lunch with Adam", date: "2026-07-14" }),
-    remove: async () => {
-      const { GoogleCalendarError } = await import("../src/integrations/providers/googleCalendar/client");
-      throw new GoogleCalendarError("provider_rate_limited", "slow down", 429);
-    },
-  });
-  const r = await handleCalendarWrite("u", "delete lunch with Adam tomorrow", deps);
-  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.unavailable);
+  assert.equal(calls.proposed.length, 0, "a recurring series must never be proposed");
 });
 
 // --- Capability gating & fall-through ------------------------------------
@@ -448,7 +554,7 @@ asyncCheck("gate: not connected -> honest connect message (no Google call)", asy
   });
   const r = await handleCalendarWrite("u", "schedule X tomorrow at 1pm", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.notConnected);
-  assert.equal(calls.created.length, 0);
+  assert.equal(calls.proposed.length, 0, "an unconnected user must not get a pending proposal");
 });
 
 asyncCheck("gate: read-only connection -> reconnect message (no Google call)", async () => {
@@ -458,7 +564,9 @@ asyncCheck("gate: read-only connection -> reconnect message (no Google call)", a
   });
   const r = await handleCalendarWrite("u", "schedule X tomorrow at 1pm", deps);
   assert.equal(r.reply, CALENDAR_WRITE_REPLIES.reconnect);
-  assert.equal(calls.created.length, 0);
+  // A read-only connection must not leave a pending proposal a later "yes" could
+  // pick up — the user is told to reconnect, and nothing stays armed.
+  assert.equal(calls.proposed.length, 0);
 });
 
 asyncCheck("fallthrough: not_calendar_write returns handled:false", async () => {
@@ -501,7 +609,7 @@ async function run(): Promise<void> {
     passed += 1;
     console.log(`  ok - ${name}`);
   }
-  console.log(`\nAll ${passed} Google Calendar write (Section 15) tests passed.`);
+  console.log(`\nAll ${passed} Google Calendar write (Sections 15 + 17) tests passed.`);
 }
 
 void run().catch((err) => {

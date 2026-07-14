@@ -6,8 +6,13 @@ import {
 } from "./client";
 import type { FetchLike } from "./oauth";
 import { parseFromHeader } from "./messages";
+import { extractPlainText } from "./messageBody";
 import {
+  GMAIL_PROVIDER,
   type GmailReplyContext,
+  type NormalizedGmailDraft,
+  type RawGmailDraftDetail,
+  type RawGmailDraftListResponse,
   type RawGmailDraftResponse,
   type RawGmailMessage,
   type RawGmailSendResponse,
@@ -215,7 +220,189 @@ export async function fetchGmailReplyContext(
   return buildReplyContext(raw);
 }
 
-// --- Diagnostic-only helpers (never wired into the iMessage flow) --------
+// --- Draft lifecycle (Section 17) ----------------------------------------
+
+/**
+ * Every draft operation below is authorised by the SAME `gmail.compose` scope
+ * Section 16 already requests (verified against Google's per-method reference for
+ * drafts.list/get/update/delete). So the complete lifecycle works on existing Gmail
+ * connections with NO reconnect, and no broader scope — notably not `gmail.modify`
+ * or `https://mail.google.com/` — is introduced.
+ */
+
+/** Cap on drafts listed in one request (bounded fan-out). */
+const DRAFT_LIST_CAP = 10;
+
+/** PURE: normalize one raw draft detail into the safe, app-facing shape. */
+export function normalizeGmailDraft(raw: RawGmailDraftDetail): NormalizedGmailDraft {
+  const headers = raw.message?.payload?.headers;
+  const to = parseFromHeader(headerValue(headers, "To"));
+  const subject = headerValue(headers, "Subject");
+  return {
+    draftId: typeof raw.id === "string" ? raw.id : "",
+    messageId: typeof raw.message?.id === "string" ? raw.message.id : null,
+    threadId: typeof raw.message?.threadId === "string" ? raw.message.threadId : null,
+    to: to.address,
+    toName: to.name,
+    subject: typeof subject === "string" ? subject : null,
+    snippet: typeof raw.message?.snippet === "string" ? raw.message.snippet : null,
+    source: GMAIL_PROVIDER,
+  };
+}
+
+/**
+ * List the user's Gmail drafts, normalized, newest-first as Gmail returns them.
+ *
+ * Two bounded stages, like every other read here: list ids, then fetch metadata for
+ * at most `DRAFT_LIST_CAP`. `drafts.list` returns only ids, so the per-draft
+ * metadata fetch is required to show a recipient/subject at all. An HTTP-200 list
+ * with no `drafts` array is a SUCCESSFUL empty result (`[]`), never an error.
+ */
+export async function listGmailDrafts(
+  userId: string,
+  options: { maxResults?: number; fetchImpl?: FetchLike } = {},
+): Promise<NormalizedGmailDraft[]> {
+  const connectionId = await requireConnectionId(userId);
+  const cap = Math.min(Math.max(1, options.maxResults ?? DRAFT_LIST_CAP), DRAFT_LIST_CAP);
+
+  const list = await gmailGetForConnection<RawGmailDraftListResponse>(
+    connectionId,
+    "/users/me/drafts",
+    { maxResults: String(cap) },
+    options.fetchImpl,
+  );
+
+  const ids = Array.isArray(list.drafts)
+    ? list.drafts
+        .map((d) => (typeof d?.id === "string" ? d.id : null))
+        .filter((id): id is string => Boolean(id))
+        .slice(0, cap)
+    : [];
+  if (ids.length === 0) return [];
+
+  const drafts: NormalizedGmailDraft[] = [];
+  for (const id of ids) {
+    try {
+      const raw = await gmailGetForConnection<RawGmailDraftDetail>(
+        connectionId,
+        `/users/me/drafts/${encodeURIComponent(id)}`,
+        { format: "metadata" },
+        options.fetchImpl,
+      );
+      const normalized = normalizeGmailDraft(raw);
+      if (normalized.draftId) drafts.push(normalized);
+    } catch (err) {
+      // A dead grant / scope failure applies to the whole batch — surface it. One
+      // malformed draft is skipped, not fatal.
+      if (err instanceof GmailError && err.reason !== "malformed_provider_response") {
+        throw err;
+      }
+    }
+  }
+  return drafts;
+}
+
+/** One draft's metadata plus its real body text (for an explicit inspect). */
+export interface GmailDraftDetail {
+  draft: NormalizedGmailDraft;
+  /** The draft's plain-text body (best-effort), or "" when none could be read. */
+  body: string;
+  /**
+   * The draft's existing `In-Reply-To` header, when it is a reply.
+   *
+   * Load-bearing for edits: Gmail's draft update REPLACES the whole message, so the
+   * rebuilt MIME must carry these headers forward or an edited reply silently
+   * detaches from its thread and arrives as a stray new email.
+   */
+  inReplyTo: string | null;
+  /** The draft's existing `References` chain, when it is a reply. */
+  references: string | null;
+}
+
+/**
+ * Fetch ONE draft in full, including its body, for an explicit inspect/edit.
+ *
+ * This is the RE-FETCH the edit and send paths depend on: it reads the draft's
+ * CURRENT state straight from Gmail rather than trusting a stored reference that
+ * may be stale (the user may have edited or deleted it in the Gmail UI since).
+ * Throws a classified `GmailError` — notably `mailbox_not_found` when the draft is
+ * gone — so the caller degrades honestly instead of acting on a dead id.
+ */
+export async function getGmailDraftDetail(
+  userId: string,
+  draftId: string,
+  fetchImpl?: FetchLike,
+): Promise<GmailDraftDetail> {
+  const connectionId = await requireConnectionId(userId);
+  const raw = await gmailGetForConnection<RawGmailDraftDetail>(
+    connectionId,
+    `/users/me/drafts/${encodeURIComponent(draftId)}`,
+    { format: "full" },
+    fetchImpl,
+  );
+  const draft = normalizeGmailDraft(raw);
+  if (!draft.draftId) {
+    throw new GmailError("malformed_provider_response", "Gmail did not return a draft id");
+  }
+  // The nested message is an ordinary message resource, so the existing body
+  // extractor (text/plain -> stripped text/html -> top-level) applies unchanged.
+  const body = raw.message ? extractPlainText(raw.message as never) : "";
+  const headers = raw.message?.payload?.headers;
+  const inReplyTo = headerValue(headers, "In-Reply-To");
+  const references = headerValue(headers, "References");
+  return {
+    draft,
+    body,
+    inReplyTo: inReplyTo && inReplyTo.trim() ? inReplyTo.trim() : null,
+    references: references && references.trim() ? references.trim() : null,
+  };
+}
+
+/**
+ * Replace an EXISTING draft's content (PUT /users/me/drafts/{id}).
+ *
+ * Gmail's update is a full REPLACE, not a patch: the supplied `raw` becomes the
+ * draft's entire new message. That is why the edit flow re-fetches the draft, edits
+ * the real body, and rebuilds the complete MIME — a partial payload here would
+ * silently discard the rest of the draft. Passing the original `threadId` keeps a
+ * reply draft in its thread. Returns the Gmail-issued ids; a response without a
+ * draft id is not a confirmed update and throws.
+ */
+export async function updateGmailDraft(
+  userId: string,
+  draftId: string,
+  payload: GmailRawPayload,
+  fetchImpl?: FetchLike,
+): Promise<CreatedGmailDraft> {
+  const connectionId = await requireConnectionId(userId);
+  const message: Record<string, string> = { raw: payload.raw };
+  if (payload.threadId) message.threadId = payload.threadId;
+  const res = await gmailRequestForConnection<RawGmailDraftResponse>(
+    connectionId,
+    "PUT",
+    `/users/me/drafts/${encodeURIComponent(draftId)}`,
+    { body: { id: draftId, message } },
+    fetchImpl,
+  );
+  const id = typeof res.id === "string" ? res.id : "";
+  const messageId = typeof res.message?.id === "string" ? res.message.id : "";
+  const threadId = typeof res.message?.threadId === "string" ? res.message.threadId : "";
+  if (!id || !messageId) {
+    throw new GmailError(
+      "malformed_provider_response",
+      "Gmail did not confirm the updated draft",
+    );
+  }
+  if (id !== draftId) {
+    // Gmail confirming a DIFFERENT draft than the one we targeted must never be
+    // reported as the requested edit succeeding.
+    throw new GmailError(
+      "malformed_provider_response",
+      "Gmail confirmed a different draft than requested",
+    );
+  }
+  return { draftId: id, messageId, threadId };
+}
 
 /** Fetch a draft's ids to verify it exists (diagnostic use only). */
 export async function getGmailDraft(
@@ -233,9 +420,13 @@ export async function getGmailDraft(
 }
 
 /**
- * Delete a draft by id. NOT part of the product flow — used ONLY by the manual
- * write diagnostic to clean up its temporary draft. `gmail.compose` permits draft
- * deletion, and this narrow, internal use never touches a real user's mail.
+ * Delete a draft by id (DELETE /users/me/drafts/{id}).
+ *
+ * DESTRUCTIVE and irreversible — Gmail does not trash a deleted draft, it removes
+ * it. Section 17 wires this into the product flow behind an explicit confirmation
+ * (`email.deleteDraft`); before that it was diagnostic-only. Success is Gmail's own
+ * 2xx: the client throws a classified error on anything else, so returning normally
+ * is the only basis on which a caller may report a deletion.
  */
 export async function deleteGmailDraft(
   userId: string,

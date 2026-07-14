@@ -13,6 +13,21 @@
 export type ActionRisk =
   | "read"
   | "draft"
+  /**
+   * A REVERSIBLE change to state the user already owns, with no external effect
+   * and nothing destroyed — marking an email read, starring it, archiving it,
+   * adding a label (Section 17).
+   *
+   * This rung exists because the ladder previously forced a false choice. Such a
+   * change is a genuine write, so calling it `read`/`draft` would be a lie; but
+   * putting it on `write` demands a confirmation for "star that email", which
+   * trains users to reflexively approve prompts — actively eroding the value of
+   * the confirmation on the rungs where it matters. Nothing here can lose data or
+   * reach another person, so it sits below `write` and needs no confirmation.
+   *
+   * Anything irreversible or externally visible does NOT belong here.
+   */
+  | "modify"
   | "write"
   | "send"
   | "purchase"
@@ -22,6 +37,7 @@ export type ActionRisk =
 export const ACTION_RISK_LEVELS: readonly ActionRisk[] = [
   "read",
   "draft",
+  "modify",
   "write",
   "send",
   "purchase",
@@ -71,6 +87,7 @@ const HARD_BLOCKED: ReadonlySet<ActionRisk> = new Set([
  * Rules (foundation):
  *   - Reads run only if the provider is connected AND the scope is granted.
  *   - Drafts follow the same connected + scope rule (they don't leave Hula).
+ *   - Modifies follow it too: reversible, non-external, nothing destroyed.
  *   - Writes/sends additionally require an explicit user confirmation.
  *   - Purchases and destructive actions are never allowed yet.
  *

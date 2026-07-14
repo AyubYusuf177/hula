@@ -11,8 +11,16 @@ import {
   cleanDisplaySubject,
 } from "./gmailActions";
 import { formatReceived, GMAIL_REPLIES } from "./gmailQuestion";
+import {
+  buildUntrustedEmailBlock,
+  untrustedContentSystemRules,
+} from "./untrustedContent";
 import type { GmailAction } from "./gmailActionExtract";
-import { GMAIL_PROVIDER, type NormalizedGmailMessage } from "./types";
+import {
+  GMAIL_PROVIDER,
+  type GmailAttachmentMeta,
+  type NormalizedGmailMessage,
+} from "./types";
 
 /**
  * Gmail READ-ONE / SUMMARISE-ONE routing (Section 16 / Fix 4) — READ-ONLY.
@@ -126,8 +134,6 @@ export function classifyReadOne(text: string | undefined): ReadOneIntent | null 
 
 /** Max characters of a real body we ever include verbatim in an iMessage read. */
 const READ_EXCERPT_MAX = 1400;
-/** Max characters of the real body we feed the summariser (bounds tokens). */
-const SUMMARY_SOURCE_MAX = 6000;
 
 function senderDisplay(msg: NormalizedGmailMessage): string {
   const name = (msg.fromName ?? "").trim();
@@ -155,14 +161,41 @@ export function excerptBody(content: string): string {
   return `${s.slice(0, READ_EXCERPT_MAX).trimEnd()}…\n\n(That’s the start — the full email is longer.)`;
 }
 
+/**
+ * PURE: a one-line attachment report (Section 17 / Phase 3.6), or "" when there are
+ * none.
+ *
+ * Metadata ONLY — filename, type, size. Hula never downloads or reads attachment
+ * content, so this reports what is attached and stops there. Filenames arrive
+ * already sanitised from `extractAttachments`, because they are chosen by the
+ * sender and are untrusted input like any other part of the mail.
+ */
+export function formatAttachments(attachments: readonly GmailAttachmentMeta[]): string {
+  if (attachments.length === 0) return "";
+  const noun = attachments.length === 1 ? "attachment" : "attachments";
+  const lines = attachments.map((a) => {
+    const size = a.sizeBytes !== null ? ` — ${formatBytes(a.sizeBytes)}` : "";
+    return `• ${a.filename} (${a.mimeType})${size}`;
+  });
+  return `\n\n${attachments.length} ${noun}:\n${lines.join("\n")}\n(I can see these are attached, but I can’t open them yet.)`;
+}
+
+/** PURE: a compact human size. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** PURE: the verbatim-read answer, grounded in the real body. */
 export function formatReadAnswer(
   msg: NormalizedGmailMessage,
   content: string,
   tz: string | undefined,
   now: Date,
+  attachments: readonly GmailAttachmentMeta[] = [],
 ): string {
-  return `${readHeader(msg, tz, now)} says:\n\n${excerptBody(content)}`;
+  return `${readHeader(msg, tz, now)} says:\n\n${excerptBody(content)}${formatAttachments(attachments)}`;
 }
 
 /** PURE: the summary answer, grounded in the real body. */
@@ -171,8 +204,9 @@ export function formatSummaryAnswer(
   summary: string,
   tz: string | undefined,
   now: Date,
+  attachments: readonly GmailAttachmentMeta[] = [],
 ): string {
-  return `Here’s the gist of ${readHeader(msg, tz, now)}:\n\n${summary.trim()}`;
+  return `Here’s the gist of ${readHeader(msg, tz, now)}:\n\n${summary.trim()}${formatAttachments(attachments)}`;
 }
 
 /** PURE: a read clarification (never persisted — reads are safe/non-destructive). */
@@ -215,6 +249,10 @@ async function defaultSummarise(params: {
     "You summarise ONE email for the recipient. Summarise ONLY what the email actually says.",
     "Never invent facts, names, dates, or offers that are not in the email.",
     "Reply in 1–3 short plain-text sentences. No preamble, no markdown.",
+    "",
+    // Section 17: the body is attacker-controlled, so it is fenced and declared
+    // untrusted rather than pasted in as if it were context we vouch for.
+    untrustedContentSystemRules(),
   ].join("\n");
   try {
     const text = await generateAnthropicText({
@@ -222,7 +260,13 @@ async function defaultSummarise(params: {
       messages: [
         {
           role: "user",
-          content: `From: ${params.sender}\nSubject: ${params.subject}\n\n${params.body.slice(0, SUMMARY_SOURCE_MAX)}`,
+          // `buildUntrustedEmailBlock` owns the length bound (UNTRUSTED_BODY_MAX),
+          // so the model context stays capped in exactly one place.
+          content: `Summarise the email below.\n\n${buildUntrustedEmailBlock({
+            sender: params.sender,
+            subject: params.subject,
+            body: params.body,
+          })}`,
         },
       ],
       maxTokens: 250,
@@ -326,13 +370,25 @@ export async function handleGmailReadOne(
         sender: senderDisplay(target),
       });
       if (summary) {
-        return { handled: true, mode: intent.mode, reply: formatSummaryAnswer(target, summary, tz, now) };
+        return {
+          handled: true,
+          mode: intent.mode,
+          reply: formatSummaryAnswer(target, summary, tz, now, body.attachments),
+        };
       }
       // Grounded fallback: show the real excerpt rather than invent a summary.
-      return { handled: true, mode: intent.mode, reply: formatReadAnswer(target, content, tz, now) };
+      return {
+        handled: true,
+        mode: intent.mode,
+        reply: formatReadAnswer(target, content, tz, now, body.attachments),
+      };
     }
 
-    return { handled: true, mode: intent.mode, reply: formatReadAnswer(target, content, tz, now) };
+    return {
+      handled: true,
+      mode: intent.mode,
+      reply: formatReadAnswer(target, content, tz, now, body.attachments),
+    };
   } catch (err) {
     if (err instanceof GmailError) {
       if (err.reason === "not_connected") {

@@ -22,6 +22,11 @@ import {
   type LoadedLastDraft,
 } from "./gmailDraftContext";
 import { formatReceived } from "./gmailQuestion";
+import {
+  loadLatestGmailSelection,
+  parseOrdinalReference,
+  resolveSelectionItem,
+} from "./gmailSelection";
 import { buildReplySubject, isValidEmailAddress } from "./mime";
 import { ensureSignature } from "./signature";
 import { getUserDisplayName } from "../../../users/profile";
@@ -82,6 +87,10 @@ export const GMAIL_WRITE_REPLIES = {
     "I couldn’t work out who to reply to from that email — mind giving me their email address?",
   threadNotFound:
     "I couldn’t find a recent email from them to reply to. Want me to send a new email instead?",
+  selectionOutOfRange:
+    "I don’t have an email at that position — mind showing me the list again?",
+  noSelection:
+    "I’m not sure which email you mean — search for it first and then tell me which one.",
   clarifyExpired:
     "That choice has expired — mind sending your reply request again?",
   clarifyAlreadyDone:
@@ -397,6 +406,8 @@ export interface GmailWriteDeps {
   generate?: TextGenerator;
   fetchMessages?: (userId: string) => Promise<NormalizedGmailMessage[]>;
   fetchReplyContext?: (userId: string, messageId: string) => Promise<GmailReplyContext>;
+  /** Loads the list Hula last showed, for positional replies ("the second one"). */
+  loadSelection?: typeof loadLatestGmailSelection;
   /** Runs an immediate action (draft) through the executor. */
   execute?: (
     userId: string,
@@ -573,6 +584,36 @@ async function runReply(
   const body = (action.body ?? "").trim();
   if (!body) return { handled: true, action: action.action, reply: GMAIL_WRITE_REPLIES.needBody };
 
+  // Section 17 — POSITIONAL reference ("reply to the second one saying …").
+  //
+  // Resolved FIRST, and against the EXACT list Hula last showed rather than a fresh
+  // fetch: re-fetching could return a different order (new mail arrives), so
+  // "the second one" would silently reply to a different thread than the one the
+  // user is looking at. Falls through to sender matching when no position is named.
+  const ordinal = parseOrdinalReference(originalText);
+  if (ordinal) {
+    const loadSelection = deps.loadSelection ?? loadLatestGmailSelection;
+    const selection = await loadSelection(userId);
+    if (selection && selection.data.itemKind === "messages") {
+      const item = resolveSelectionItem(selection.data, ordinal);
+      if (!item) {
+        return {
+          handled: true,
+          action: action.action,
+          reply: GMAIL_WRITE_REPLIES.selectionOutOfRange,
+        };
+      }
+      return await replyToMessageId(userId, action, item.id, body, deps);
+    }
+    // A position with no remembered list can't be resolved safely — ask rather
+    // than fall back to sender matching, which would pick a different email.
+    return {
+      handled: true,
+      action: action.action,
+      reply: GMAIL_WRITE_REPLIES.noSelection,
+    };
+  }
+
   const fetchMessages = deps.fetchMessages ?? fetchRecentGmailMessages;
   const messages = await fetchMessages(userId);
   // Recency preference is derived from the user's OWN words, never the model.
@@ -604,8 +645,27 @@ async function runReply(
     return { handled: true, action: action.action, reply: preview };
   }
 
+  return await replyToMessageId(userId, action, target.message.id, body, deps, target.message.threadId);
+}
+
+/**
+ * Build and finish a reply to ONE already-resolved message id.
+ *
+ * Shared by both resolution routes (positional and sender-matched) so threading is
+ * derived identically no matter how the target was chosen: the reply context is
+ * always re-fetched from Gmail for that exact message, and In-Reply-To/References
+ * always come from the real headers.
+ */
+async function replyToMessageId(
+  userId: string,
+  action: GmailAction,
+  messageId: string,
+  body: string,
+  deps: GmailWriteDeps,
+  fallbackThreadId?: string,
+): Promise<GmailWriteResult> {
   const fetchReplyContext = deps.fetchReplyContext ?? fetchGmailReplyContext;
-  const ctx = await fetchReplyContext(userId, target.message.id);
+  const ctx = await fetchReplyContext(userId, messageId);
   const to = (ctx.replyToAddress ?? "").trim();
   if (!isValidEmailAddress(to)) {
     return { handled: true, action: action.action, reply: GMAIL_WRITE_REPLIES.noReplyRecipient };
@@ -618,7 +678,7 @@ async function runReply(
     subject,
     body,
     isReply: true,
-    threadId: ctx.threadId || target.message.threadId || undefined,
+    threadId: ctx.threadId || fallbackThreadId || undefined,
     inReplyTo: ctx.messageIdHeader ?? undefined,
     references: buildReferences(ctx.references, ctx.messageIdHeader),
     threadSubject: ctx.subject,

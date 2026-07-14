@@ -88,18 +88,25 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     category: "email",
     status: "available_readonly",
     authType: "oauth2",
-    // Section 16: request the READ-ONLY scope (list/read metadata) PLUS the
-    // least-privilege WRITE scope `gmail.compose` (create drafts + send
-    // messages/replies). `gmail.compose` deliberately does NOT grant delete,
-    // label, archive, or full-mailbox powers. A connection made before this
-    // change holds only `gmail.readonly` and must be reconnected to draft/send.
+    // Section 16: the READ-ONLY scope (list/read metadata) PLUS the least-privilege
+    // WRITE scope `gmail.compose` (create/update/delete drafts + send).
+    //
+    // Section 17 adds `gmail.modify`, required by messages.modify/trash/untrash —
+    // Google's per-method reference does NOT accept `gmail.compose` for those. It is
+    // ADDED, never a replacement: readonly and compose still back search, drafts,
+    // and sending, so a user who declines `gmail.modify` keeps every earlier
+    // capability and only message management refuses (with a reconnect message).
+    //
+    // `https://mail.google.com/` is deliberately NOT requested: it additionally
+    // grants permanent deletion bypassing the trash, which Hula does not implement.
     defaultScopes: [
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
     ],
-    capabilities: ["email.read", "email.draft", "email.send"],
+    capabilities: ["email.read", "email.draft", "email.send", "email.modify"],
     notes:
-      "Live integration. Read (Section 14) + draft/send email and replies (Section 16) via OAuth (Authorization Code + PKCE). Drafting/sending requires the gmail.compose scope; every actual send needs explicit confirmation.",
+      "Live integration. Read (Section 14) + draft/send (Section 16) + search, draft lifecycle, and message management (Section 17) via OAuth (Authorization Code + PKCE). Drafting/sending requires gmail.compose; marking/starring/archiving/trashing requires gmail.modify. Every send, draft deletion, and trash needs explicit confirmation.",
   },
   {
     provider: "zoom",
