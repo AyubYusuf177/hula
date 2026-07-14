@@ -5,11 +5,14 @@ import {
   googleCalendarGetForConnection,
 } from "./client";
 import type { FetchLike } from "./oauth";
+import { normalizeConferenceData } from "./conference";
 import {
   GOOGLE_CALENDAR_PROVIDER,
+  type CalendarAttendee,
   type CalendarRange,
   type CalendarTimeRange,
   type NormalizedCalendarEvent,
+  type RawGoogleAttendee,
   type RawGoogleEvent,
 } from "./types";
 
@@ -103,39 +106,108 @@ export function computeRange(
 }
 
 /**
+ * Pure: normalize one raw Google attendee into the safe shape, or null.
+ *
+ * An attendee without an email is unusable (we could neither show nor preserve
+ * it reliably), and Google's ROOM/equipment resources are dropped — the user
+ * means people when they ask who's invited, and listing a conference room as an
+ * attendee is noise at best and confusing at worst.
+ */
+export function normalizeAttendee(raw: RawGoogleAttendee): CalendarAttendee | null {
+  const email = typeof raw?.email === "string" ? raw.email.trim() : "";
+  if (!email) return null;
+  if (raw.resource === true) return null;
+  return {
+    email,
+    displayName: typeof raw.displayName === "string" ? raw.displayName : null,
+    responseStatus:
+      typeof raw.responseStatus === "string" ? raw.responseStatus : null,
+    optional: raw.optional === true,
+    self: raw.self === true,
+    organizer: raw.organizer === true,
+  };
+}
+
+/**
  * Pure: normalize one raw Google event into the safe, app-facing shape. Only
- * whitelisted fields are kept — the event description and any other raw payload
- * are deliberately dropped.
+ * whitelisted fields are kept — no raw provider payload ever survives.
  */
 export function normalizeGoogleEvent(
   raw: RawGoogleEvent,
   calendarId: string,
 ): NormalizedCalendarEvent {
   const allDay = Boolean(raw.start?.date && !raw.start?.dateTime);
+  const rawAttendees = Array.isArray(raw.attendees) ? raw.attendees : [];
+  const attendees = rawAttendees
+    .map((a) => normalizeAttendee(a))
+    .filter((a): a is CalendarAttendee => a !== null);
+  const isRecurringMaster =
+    Array.isArray(raw.recurrence) && raw.recurrence.length > 0;
+
   return {
     id: typeof raw.id === "string" ? raw.id : "",
     calendarId,
     summary: typeof raw.summary === "string" ? raw.summary : null,
     location: typeof raw.location === "string" ? raw.location : null,
+    description: typeof raw.description === "string" ? raw.description : null,
     start: raw.start?.dateTime ?? raw.start?.date ?? null,
     end: raw.end?.dateTime ?? raw.end?.date ?? null,
     allDay,
     status: typeof raw.status === "string" ? raw.status : null,
     htmlLink: typeof raw.htmlLink === "string" ? raw.htmlLink : null,
+    // Preserve the previous semantics: null (not 0) when Google sent no
+    // attendees array at all, so "unknown" stays distinguishable from "none".
     attendeeCount: Array.isArray(raw.attendees) ? raw.attendees.length : null,
+    attendees,
     organizerEmail:
       typeof raw.organizer?.email === "string" ? raw.organizer.email : null,
-    // Recurring-series safety signal: an instance carries `recurringEventId`;
-    // a master event carries a `recurrence` array (we mark it non-null too so a
-    // write can detect and avoid touching a whole series).
+    timeZone:
+      typeof raw.start?.timeZone === "string" ? raw.start.timeZone : null,
+    // Conference normalization is the ONLY route to a Meet URL — it validates
+    // Google's entry points and returns null rather than guessing a link.
+    conference: normalizeConferenceData(raw.conferenceData),
+    // Recurring-series safety signal: an instance carries `recurringEventId`; a
+    // master event carries a `recurrence` array (marked non-null too, so a write
+    // can detect it and ask which scope the user means).
     recurringEventId:
       typeof raw.recurringEventId === "string"
         ? raw.recurringEventId
-        : Array.isArray(raw.recurrence) && raw.recurrence.length > 0
+        : isRecurringMaster
           ? (typeof raw.id === "string" ? raw.id : "recurring")
           : null,
+    isRecurringMaster,
     source: GOOGLE_CALENDAR_PROVIDER,
   };
+}
+
+/**
+ * Pure: collapse repeated instances of the SAME recurring series down to the
+ * earliest one (Section 18).
+ *
+ * `singleEvents=true` expands a series into one item per occurrence, so a
+ * "what's on this week" read of a daily standup returns five near-identical
+ * lines and crowds out everything else. The user wants their week, not five
+ * copies of one habit. Only applied to multi-day RANGE reads — a single-day
+ * schedule legitimately shows every occurrence that falls that day, and event
+ * RESOLUTION for a write must never dedupe, because there the whole point is to
+ * find the one specific occurrence being talked about.
+ */
+export function dedupeRecurringSeries(
+  events: NormalizedCalendarEvent[],
+): NormalizedCalendarEvent[] {
+  const seenSeries = new Set<string>();
+  const out: NormalizedCalendarEvent[] = [];
+  for (const event of events) {
+    const series = event.recurringEventId;
+    if (!series) {
+      out.push(event);
+      continue;
+    }
+    if (seenSeries.has(series)) continue;
+    seenSeries.add(series);
+    out.push(event);
+  }
+  return out;
 }
 
 /** The safe Google account identity we may store (email + display name). */

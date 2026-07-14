@@ -34,6 +34,19 @@ export interface ConsumedOAuthState {
   appReturnUrl: string | null;
 }
 
+/**
+ * A read-only view of an ALREADY-CONSUMED state, for the callback-replay check.
+ *
+ * Deliberately carries NO `codeVerifier`: the replay path must never be able to
+ * perform a token exchange, so it is not even given the material to attempt one.
+ */
+export interface ConsumedOAuthStateRef {
+  userId: string;
+  provider: string;
+  appReturnUrl: string | null;
+  consumedAt: Date;
+}
+
 /** Generate an unguessable, URL-safe state token. */
 export function generateStateToken(): string {
   return randomBytes(32).toString("base64url");
@@ -114,5 +127,37 @@ export async function consumeOAuthState(
     scopes: toStringArray(row.scopes),
     codeVerifier: row.codeVerifier,
     appReturnUrl: row.appReturnUrl ?? null,
+  };
+}
+
+/**
+ * READ-ONLY lookup of a state that has ALREADY been consumed, for the
+ * callback-replay check (see `oauthReplay.ts`). Mutates nothing.
+ *
+ * Returns null unless the row exists, matches the provider, and is in the
+ * `consumed` state with a `consumedAt` stamp. Every other status fails closed
+ * here:
+ *   - `pending`  — never consumed, so there is no earlier success to mirror.
+ *     (In practice `consumeOAuthState` would have claimed it already.)
+ *   - `expired`  — the TTL lapsed; `consumeOAuthState` flips it here, so a
+ *     replayed expired state can never be mistaken for a completed one.
+ *   - missing / wrong provider — nothing to mirror.
+ *
+ * `consumed` alone is NOT evidence the callback succeeded — it only means the
+ * exchange was *started*. The caller must still prove the outcome; this function
+ * deliberately does not.
+ */
+export async function findConsumedOAuthState(
+  state: string,
+  provider: string,
+): Promise<ConsumedOAuthStateRef | null> {
+  const row = await getPrisma().integrationOAuthState.findUnique({ where: { state } });
+  if (!row || row.provider !== provider) return null;
+  if (row.status !== "consumed" || !row.consumedAt) return null;
+  return {
+    userId: row.userId,
+    provider: row.provider,
+    appReturnUrl: row.appReturnUrl ?? null,
+    consumedAt: row.consumedAt,
   };
 }

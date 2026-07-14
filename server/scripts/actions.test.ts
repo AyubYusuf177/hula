@@ -456,6 +456,13 @@ const sampleEvent: NormalizedCalendarEvent = {
   status: "confirmed",
   htmlLink: null,
   attendeeCount: 3,
+  // Section 18 fields. Real events always carry these — a fixture that
+  // omits them is not a realistic event and hides formatting bugs.
+  description: null,
+  attendees: [],
+  timeZone: null,
+  conference: null,
+  isRecurringMaster: false,
   organizerEmail: "someone@example.com",
   source: "google_calendar",
 };
@@ -552,6 +559,13 @@ function fakeEvent(id: string, startIso: string, endIso: string): NormalizedCale
     status: "confirmed",
     htmlLink: null,
     attendeeCount: null,
+    // Section 18 fields. Real events always carry these — a fixture that
+    // omits them is not a realistic event and hides formatting bugs.
+    description: null,
+    attendees: [],
+    timeZone: null,
+    conference: null,
+    isRecurringMaster: false,
     organizerEmail: null,
     source: "google_calendar",
   };
@@ -588,7 +602,11 @@ asyncCheck("executor: confirmed calendar create writes and confirms from the rea
   assert.ok(/scheduled/i.test(result.userMessage));
   assert.ok(sentFields, "provider must have been called");
   // The ledger keeps the Google-issued id only — never the title or times.
-  assert.deepEqual(recorded[0]?.resultSummary, { eventId: "evt_new" });
+  // Section 18 adds `verified` — whether the postcondition re-read matched. It is
+  // false here because this test injects no `getCalendarEvent`, so the re-read
+  // could not run. The ledger still carries the Google-issued id and NOTHING else
+  // that could identify the event's content.
+  assert.deepEqual(recorded[0]?.resultSummary, { eventId: "evt_new", verified: false });
   assert.equal(JSON.stringify(recorded).includes("Gym"), false, "no event title in the ledger");
 });
 

@@ -9,6 +9,7 @@ import {
 } from "../integrations/connections";
 import { storeCredentialSecrets } from "../integrations/credentials";
 import { consumeOAuthState, createOAuthState } from "../integrations/oauthState";
+import { resolveOAuthCallbackReplay } from "../integrations/oauthReplay";
 import {
   GoogleOAuthConfigError,
   buildAuthorizationUrl,
@@ -74,8 +75,14 @@ function resultPage(input: {
   const safeUrl = input.returnUrl ? escapeHtmlAttr(input.returnUrl) : null;
   const accent = input.accent === "ok" ? "#7B4DFF" : "#F0A868";
   const button = safeUrl ? `<a class="btn" href="${safeUrl}">Return to Hula</a>` : "";
+  // `location.replace` rather than `location.href`: it does NOT push a history
+  // entry, so dismissing the "Open in Hula?" prompt can't leave the browser able
+  // to restore/back onto this URL and re-issue the callback GET — one real source
+  // of the duplicate callback. This reduces the double request; it does not rely
+  // on eliminating it, because a bfcache restore or prefetch can still re-issue a
+  // GET. Correctness under replay is handled server-side (see `oauthReplay.ts`).
   const autoRedirect = safeUrl
-    ? `<script>setTimeout(function(){try{window.location.href=${JSON.stringify(input.returnUrl)};}catch(e){}},400);</script>`
+    ? `<script>setTimeout(function(){try{window.location.replace(${JSON.stringify(input.returnUrl)});}catch(e){}},400);</script>`
     : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtmlAttr(input.title)}</title><style>
 :root{color-scheme:dark}
@@ -244,9 +251,25 @@ gmailRouter.get("/v1/integrations/gmail/callback", async (req, res) => {
 
   try {
     // Validate + consume the anti-CSRF state (single use). The provider filter
-    // ensures a Calendar state can never be consumed as a Gmail one.
+    // ensures a Calendar state can never be consumed as a Gmail one. This atomic
+    // claim is still the ONLY path that can reach a token exchange.
     const consumed = await consumeOAuthState(state, GMAIL_PROVIDER);
     if (!consumed) {
+      // Same shared flaw as the Calendar callback: a browser-re-issued GET must
+      // not render a failure over an already-successful connect. Proven against
+      // the connection itself — no exchange, no credential write. The provider is
+      // pinned to Gmail, so a Calendar state can never resolve here.
+      const replay = await resolveOAuthCallbackReplay(state, GMAIL_PROVIDER);
+      if (replay) {
+        logger.info("gmail.callback replayed after success", {
+          willReturnToApp: Boolean(replay.appReturnUrl),
+        });
+        res
+          .status(200)
+          .type("html")
+          .send(successPage(sanitizeAppReturnUrl(replay.appReturnUrl)));
+        return;
+      }
       logger.info("gmail.callback rejected state");
       res.status(400).type("html").send(errorPage(null));
       return;

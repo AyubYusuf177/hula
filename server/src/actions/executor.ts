@@ -9,9 +9,23 @@ import { formatCalendarAnswer } from "../integrations/providers/googleCalendar/c
 import {
   createCalendarEvent,
   deleteCalendarEvent,
+  getCalendarEvent,
   updateCalendarEvent,
+  verifyEventDeleted,
   type CalendarEventWriteFields,
+  type SendUpdatesMode,
 } from "../integrations/providers/googleCalendar/calendarWrites";
+import {
+  verifyEventState,
+  type EventExpectation,
+  type EventVerification,
+} from "../integrations/providers/googleCalendar/calendarVerify";
+import {
+  recordActedCalendarEvent,
+  toSelectionItem,
+  type CalendarActedKind,
+} from "../integrations/providers/googleCalendar/calendarContext";
+import { formatEventWhen } from "../integrations/providers/googleCalendar/calendarDisplay";
 import {
   CALENDAR_WRITE_REPLIES,
   formatCreated,
@@ -151,6 +165,15 @@ export interface ExecuteActionDeps {
   createCalendarEvent?: typeof createCalendarEvent;
   updateCalendarEvent?: typeof updateCalendarEvent;
   deleteCalendarEvent?: typeof deleteCalendarEvent;
+  /**
+   * The Section 18 POSTCONDITION reads. Separate from the write fns on purpose:
+   * a write's own response is Google's echo of the request, while these ask what
+   * is actually on the calendar now.
+   */
+  getCalendarEvent?: typeof getCalendarEvent;
+  verifyEventDeleted?: typeof verifyEventDeleted;
+  /** Records "the meeting you just created" — ONLY after verification. */
+  recordActedCalendarEvent?: typeof recordActedCalendarEvent;
 }
 
 /** Generic stub reply for a defined-but-unimplemented action. */
@@ -277,6 +300,9 @@ export async function executeAction(
           create: deps.createCalendarEvent ?? createCalendarEvent,
           update: deps.updateCalendarEvent ?? updateCalendarEvent,
           remove: deps.deleteCalendarEvent ?? deleteCalendarEvent,
+          getEvent: deps.getCalendarEvent ?? getCalendarEvent,
+          verifyDeleted: deps.verifyEventDeleted ?? verifyEventDeleted,
+          recordActed: deps.recordActedCalendarEvent ?? recordActedCalendarEvent,
         },
       );
     }
@@ -417,13 +443,18 @@ export async function executeAction(
 
 /**
  * Execute a Calendar create/update/cancel from ALREADY-RESOLVED structured input
- * (Section 17).
+ * (Sections 17 + 18).
  *
- * The proposal carries the exact Google event id and the exact ISO instants that
- * were previewed to the user, so this performs the write and nothing else — it
- * resolves no events, re-parses no dates, and re-checks no ambiguity. Success is
- * claimed ONLY from Google's validated response (`calendarWrites` enforces a real
- * event id); a thrown provider error is mapped to an honest reply. Never throws.
+ * The proposal carries the exact Google event id, the exact ISO instants, the
+ * exact attendee list, and — when a Google Meet was asked for — the exact
+ * conference `requestId` that were previewed to the user. So this performs the
+ * write and nothing else: it resolves no events, re-parses no dates, invents no
+ * addresses, and re-checks no ambiguity.
+ *
+ * Success is claimed ONLY from Google's validated response (`calendarWrites`
+ * enforces a real event id) and then CHECKED against a fresh read of the
+ * calendar (Section 18). A thrown provider error is mapped to an honest reply.
+ * Never throws.
  */
 async function runCalendarWrite(
   userId: string,
@@ -437,6 +468,9 @@ async function runCalendarWrite(
     create: typeof createCalendarEvent;
     update: typeof updateCalendarEvent;
     remove: typeof deleteCalendarEvent;
+    getEvent: typeof getCalendarEvent;
+    verifyDeleted: typeof verifyEventDeleted;
+    recordActed: typeof recordActedCalendarEvent;
   },
 ): Promise<ActionExecutionResult> {
   const timezone = readStr(input, "timezone") || undefined;
@@ -444,6 +478,17 @@ async function runCalendarWrite(
   const title = readStr(input, "title");
   const startIso = readStr(input, "startIso");
   const endIso = readStr(input, "endIso");
+  const attendees = readStrArray(input, "attendees");
+  const conferenceRequestId = readStr(input, "conferenceRequestId");
+
+  /**
+   * Whether Google emails the guests. `none` is the default everywhere; `all` is
+   * used ONLY when the proposal recorded that guests exist AND the preview the
+   * user confirmed told them invitations would go out. An invitation is
+   * unrecallable, so it may never be a side effect of a default.
+   */
+  const sendUpdates: SendUpdatesMode =
+    input?.notifyGuests === true || attendees.length > 0 ? "all" : "none";
 
   const fail = async (
     errorMessage: string,
@@ -462,43 +507,115 @@ async function runCalendarWrite(
 
   try {
     if (actionId === "calendar.createEvent") {
-      if (!title || !startIso || !endIso) {
-        return await fail("invalid_input", CALENDAR_WRITE_REPLIES.unavailable);
+      const allDay = input?.allDay === true;
+      const startDate = readStr(input, "startDate");
+      const endDate = readStr(input, "endDate");
+
+      const fields: CalendarEventWriteFields = {};
+      const expectation: EventExpectation = {};
+
+      if (!title) return await fail("invalid_input", CALENDAR_WRITE_REPLIES.unavailable);
+      fields.summary = title;
+      expectation.title = title;
+
+      if (allDay) {
+        if (!startDate || !endDate) {
+          return await fail("invalid_input", CALENDAR_WRITE_REPLIES.unavailable);
+        }
+        // All-day uses a bare date on BOTH ends; `end.date` is exclusive.
+        fields.start = { date: startDate };
+        fields.end = { date: endDate };
+        expectation.startDate = startDate;
+      } else {
+        if (!startIso || !endIso) {
+          return await fail("invalid_input", CALENDAR_WRITE_REPLIES.unavailable);
+        }
+        // Re-check never-past HERE, not just at proposal time. Deferring the
+        // write until confirmation opens a window (up to the proposal TTL) in
+        // which a previewed start can slip into the past — the proposal-time
+        // check alone no longer covers it.
+        const startMs = new Date(startIso).getTime();
+        if (!Number.isFinite(startMs) || startMs <= Date.now()) {
+          return await fail("start_in_past", CALENDAR_WRITE_REPLIES.inPast);
+        }
+        fields.start = { dateTime: startIso, timeZone: timezone };
+        fields.end = { dateTime: endIso, timeZone: timezone };
+        expectation.startIso = startIso;
+        expectation.endIso = endIso;
       }
-      // Re-check never-past HERE, not just at proposal time. Deferring the write
-      // until confirmation opens a window (up to the proposal TTL) in which a
-      // previewed start can slip into the past — the proposal-time check alone no
-      // longer covers it.
-      const startMs = new Date(startIso).getTime();
-      if (!Number.isFinite(startMs) || startMs <= Date.now()) {
-        return await fail("start_in_past", CALENDAR_WRITE_REPLIES.inPast);
-      }
-      const fields: CalendarEventWriteFields = {
-        summary: title,
-        start: { dateTime: startIso, timeZone: timezone },
-        end: { dateTime: endIso, timeZone: timezone },
-      };
+
       const location = readStr(input, "location");
       const description = readStr(input, "description");
-      if (location) fields.location = location;
-      if (description) fields.description = description;
+      if (location) {
+        fields.location = location;
+        expectation.location = location;
+      }
+      if (description) {
+        fields.description = description;
+        expectation.description = description;
+      }
+      if (attendees.length > 0) {
+        fields.attendees = attendees.map((email) => ({ email }));
+        expectation.attendees = attendees;
+      }
+      const reminderMinutes = readNum(input, "reminderMinutes");
+      if (reminderMinutes !== null) {
+        fields.reminders = [{ method: "popup", minutes: reminderMinutes }];
+      }
+      if (conferenceRequestId) {
+        // Replaying the SAME id on a duplicate confirmation makes Google return
+        // the SAME conference rather than allocating a second Meet.
+        fields.addConferenceRequestId = conferenceRequestId;
+        expectation.expectMeet = true;
+      }
 
-      const event = await ctx.create(userId, fields);
+      const event = await ctx.create(userId, fields, { sendUpdates });
+      const { observed, verification } = await verifyWrite(
+        userId,
+        event,
+        expectation,
+        ctx.getEvent,
+      );
+
+      // A verified MISMATCH means the calendar does not say what we were about
+      // to claim. Report what is actually true instead of the intent.
+      if (verification && !verification.ok) {
+        return await reportPartial(
+          userId,
+          actionId,
+          provider,
+          observed,
+          verification,
+          timezone,
+          ctx,
+          "created",
+        );
+      }
+
       const executionId = await ctx.record(userId, {
         proposalId: ctx.proposalId,
         provider,
         actionId,
         status: "succeeded",
-        requestSummary: { hasLocation: Boolean(location), hasDescription: Boolean(description) },
+        requestSummary: {
+          hasLocation: Boolean(location),
+          hasDescription: Boolean(description),
+          attendeeCount: attendees.length,
+          requestedMeet: Boolean(conferenceRequestId),
+          allDay,
+        },
         // Ledger keeps only the Google-issued id — never the title or times.
-        resultSummary: { eventId: event.id },
+        resultSummary: { eventId: event.id, verified: verification?.ok ?? false },
       });
+
+      await rememberActed(userId, observed, "created", ctx);
+
       return {
         ok: true,
         status: "succeeded",
         actionId,
         provider,
-        userMessage: formatCreated(event, timezone),
+        userMessage: formatCreated(observed, timezone),
         executionId,
         receipt: { eventId: event.id },
       };
@@ -507,39 +624,92 @@ async function runCalendarWrite(
     if (actionId === "calendar.updateEvent") {
       if (!eventId) return await fail("invalid_input", CALENDAR_WRITE_REPLIES.unavailable);
       const fields: CalendarEventWriteFields = {};
+      const expectation: EventExpectation = {};
+
       const newTitle = readStr(input, "newTitle");
       const newLocation = readStr(input, "newLocation");
-      if (newTitle) fields.summary = newTitle;
-      if (newLocation) fields.location = newLocation;
+      const newDescription = readStr(input, "newDescription");
+      if (newTitle) {
+        fields.summary = newTitle;
+        expectation.title = newTitle;
+      }
+      if (newLocation) {
+        fields.location = newLocation;
+        expectation.location = newLocation;
+      }
+      if (newDescription) {
+        fields.description = newDescription;
+        expectation.description = newDescription;
+      }
       if (startIso && endIso) {
-        // Same never-past re-check as create: a reschedule confirmed late must not
-        // land the event in the past.
+        // Same never-past re-check as create: a reschedule confirmed late must
+        // not land the event in the past.
         const startMs = new Date(startIso).getTime();
         if (!Number.isFinite(startMs) || startMs <= Date.now()) {
           return await fail("start_in_past", CALENDAR_WRITE_REPLIES.inPast);
         }
         fields.start = { dateTime: startIso, timeZone: timezone };
         fields.end = { dateTime: endIso, timeZone: timezone };
+        expectation.startIso = startIso;
+        expectation.endIso = endIso;
       }
+      if (attendees.length > 0) {
+        // The proposal already merged this into the COMPLETE list — Google's
+        // PATCH replaces the array wholesale rather than merging.
+        fields.attendees = attendees.map((email) => ({ email }));
+        expectation.attendees = attendees;
+      }
+      const reminderMinutes = readNum(input, "reminderMinutes");
+      if (reminderMinutes !== null) {
+        fields.reminders = [{ method: "popup", minutes: reminderMinutes }];
+      }
+      if (conferenceRequestId) {
+        fields.addConferenceRequestId = conferenceRequestId;
+        expectation.expectMeet = true;
+      }
+
       if (Object.keys(fields).length === 0) {
         return await fail("invalid_input", CALENDAR_WRITE_REPLIES.needChange);
       }
 
-      const event = await ctx.update(userId, eventId, fields);
+      const event = await ctx.update(userId, eventId, fields, { sendUpdates });
+      const { observed, verification } = await verifyWrite(
+        userId,
+        event,
+        expectation,
+        ctx.getEvent,
+      );
+
+      if (verification && !verification.ok) {
+        return await reportPartial(
+          userId,
+          actionId,
+          provider,
+          observed,
+          verification,
+          timezone,
+          ctx,
+          "updated",
+        );
+      }
+
       const executionId = await ctx.record(userId, {
         proposalId: ctx.proposalId,
         provider,
         actionId,
         status: "succeeded",
         requestSummary: { changedKeys: Object.keys(fields) },
-        resultSummary: { eventId: event.id },
+        resultSummary: { eventId: event.id, verified: verification?.ok ?? false },
       });
+
+      await rememberActed(userId, observed, "updated", ctx);
+
       return {
         ok: true,
         status: "succeeded",
         actionId,
         provider,
-        userMessage: formatUpdated(event, timezone, input?.renamedOnly === true),
+        userMessage: formatUpdated(observed, timezone, input?.renamedOnly === true),
         executionId,
         receipt: { eventId: event.id },
       };
@@ -550,37 +720,60 @@ async function runCalendarWrite(
     // classified error. The confirmation uses the details captured at proposal
     // time because a deleted event has no response body to read them back from.
     if (!eventId) return await fail("invalid_input", CALENDAR_WRITE_REPLIES.unavailable);
-    await ctx.remove(userId, eventId);
+    await ctx.remove(userId, eventId, { sendUpdates });
+
+    // Postcondition: ask whether it is actually gone. A `false` here means
+    // Google accepted the DELETE but the event is still on the calendar — which
+    // must never be reported as a deletion.
+    let deletionVerified: boolean | null = null;
+    try {
+      deletionVerified = await ctx.verifyDeleted(userId, eventId);
+    } catch {
+      // Couldn't check (transport). The 2xx stands as Google's own confirmation.
+      deletionVerified = null;
+    }
+    if (deletionVerified === false) {
+      return await fail("delete_not_verified", CALENDAR_WRITE_REPLIES.unavailable);
+    }
+
+    const deletedEvent: NormalizedCalendarEvent = {
+      id: eventId,
+      calendarId: "primary",
+      summary: title || null,
+      location: null,
+      description: null,
+      start: startIso || null,
+      end: endIso || null,
+      allDay: false,
+      status: "cancelled",
+      htmlLink: null,
+      attendeeCount: null,
+      attendees: [],
+      organizerEmail: null,
+      timeZone: null,
+      conference: null,
+      recurringEventId: null,
+      isRecurringMaster: false,
+      source: "google_calendar",
+    };
+
     const executionId = await ctx.record(userId, {
       proposalId: ctx.proposalId,
       provider,
       actionId,
       status: "succeeded",
-      requestSummary: {},
-      resultSummary: { eventId },
+      requestSummary: { recurrenceScope: readStr(input, "recurrenceScope") || "this_event" },
+      resultSummary: { eventId, verified: deletionVerified === true },
     });
+
+    await rememberActed(userId, deletedEvent, "cancelled", ctx);
+
     return {
       ok: true,
       status: "succeeded",
       actionId,
       provider,
-      userMessage: formatDeleted(
-        {
-          id: eventId,
-          calendarId: "primary",
-          summary: title || null,
-          location: null,
-          start: startIso || null,
-          end: endIso || null,
-          allDay: false,
-          status: null,
-          htmlLink: null,
-          attendeeCount: null,
-          organizerEmail: null,
-          source: "google_calendar",
-        },
-        timezone,
-      ),
+      userMessage: formatDeleted(deletedEvent, timezone),
       executionId,
       receipt: { eventId },
     };
@@ -605,10 +798,133 @@ async function runCalendarWrite(
   }
 }
 
+/**
+ * Re-read the event and check it against what the write promised (Section 18).
+ *
+ * The re-fetch is BEST-EFFORT on transport failure but AUTHORITATIVE on
+ * mismatch. Those are different situations and collapsing them would be wrong in
+ * both directions:
+ *  - If the re-read fails (network), the write's own validated receipt — a real
+ *    Google-issued event id — is still genuine evidence the event exists. Refusing
+ *    to report a real success because a second call flaked would make Hula lie in
+ *    the other direction. `verification` is null and the caller reports from the
+ *    receipt.
+ *  - If the re-read SUCCEEDS and disagrees, reality wins, unconditionally.
+ */
+async function verifyWrite(
+  userId: string,
+  written: NormalizedCalendarEvent,
+  expectation: EventExpectation,
+  getEvent: typeof getCalendarEvent,
+): Promise<{ observed: NormalizedCalendarEvent; verification: EventVerification | null }> {
+  try {
+    const fresh = await getEvent(userId, written.id);
+    return { observed: fresh, verification: verifyEventState(fresh, expectation) };
+  } catch {
+    return { observed: written, verification: null };
+  }
+}
+
+/**
+ * Remember an event a write VERIFIABLY landed on, so "move it to Friday" and
+ * "the meeting you just created" resolve. Best-effort: losing this costs the
+ * pronoun shortcut, never the action.
+ */
+async function rememberActed(
+  userId: string,
+  event: NormalizedCalendarEvent,
+  kind: CalendarActedKind,
+  ctx: { recordActed: typeof recordActedCalendarEvent },
+): Promise<void> {
+  try {
+    await ctx.recordActed(userId, {
+      event: toSelectionItem(event),
+      kind,
+      at: new Date().toISOString(),
+    });
+  } catch {
+    // Non-fatal by design.
+  }
+}
+
+/**
+ * Report a write whose postcondition did NOT match (Section 18).
+ *
+ * This is the anti-fabrication path. The write reached Google and Google
+ * answered 2xx, but the calendar does not say what we were about to claim — the
+ * commonest real case being a Meet that was silently not created. Hula reports
+ * what it OBSERVED, names the gap, and records the execution as `failed` so the
+ * ledger doesn't show a success that isn't one. Crucially it does NOT retry: the
+ * write is ambiguous, and retrying an ambiguous write is how duplicates happen.
+ */
+async function reportPartial(
+  userId: string,
+  actionId: string,
+  provider: string,
+  observed: NormalizedCalendarEvent,
+  verification: EventVerification,
+  timezone: string | undefined,
+  ctx: { record: typeof recordActionExecution; proposalId: string | null; inputKeys: string[] },
+  kind: "created" | "updated",
+): Promise<ActionExecutionResult> {
+  const executionId = await ctx.record(userId, {
+    proposalId: ctx.proposalId,
+    provider,
+    actionId,
+    status: "failed",
+    requestSummary: { inputKeys: ctx.inputKeys },
+    resultSummary: { eventId: observed.id, mismatches: verification.mismatches },
+    errorMessage: "postcondition_mismatch",
+  });
+
+  const base =
+    kind === "created"
+      ? `I created “${(observed.summary ?? "").trim() || "the event"}”, but it didn’t save exactly as I described.`
+      : `I changed “${(observed.summary ?? "").trim() || "the event"}”, but it didn’t save exactly as I described.`;
+
+  // Name the gap concretely. A vague "something went wrong" would leave the user
+  // unable to tell whether their meeting exists.
+  const notes: string[] = [];
+  if (verification.mismatches.includes("conference")) {
+    notes.push("Google didn’t attach a Meet link.");
+  }
+  if (verification.mismatches.includes("attendees")) {
+    notes.push("Not everyone I listed was added as a guest.");
+  }
+  if (verification.mismatches.includes("start") || verification.mismatches.includes("end")) {
+    notes.push(`It’s showing as ${formatEventWhen(observed, timezone, { includeDay: true })}.`);
+  }
+  if (verification.mismatches.includes("location")) notes.push("The location didn’t stick.");
+  if (verification.mismatches.includes("title")) notes.push("The title didn’t stick.");
+  if (verification.mismatches.includes("description")) notes.push("The description didn’t stick.");
+  notes.push("Have a look at the event and I can fix it from there.");
+
+  return {
+    ok: false,
+    status: "failed",
+    actionId,
+    provider,
+    userMessage: [base, ...notes].join(" "),
+    executionId,
+    receipt: { eventId: observed.id },
+  };
+}
+
 /** PURE: read a string field from redacted input, trimmed, or "". */
 function readStr(input: Record<string, unknown> | undefined, key: string): string {
   const v = input?.[key];
   return typeof v === "string" ? v.trim() : "";
+}
+
+/**
+ * PURE: read a finite number field from redacted input, or null.
+ *
+ * Distinguishes "absent" from 0 — a `reminderMinutes: 0` means "at the moment it
+ * starts", which is a real, different request from no reminder at all.
+ */
+function readNum(input: Record<string, unknown> | undefined, key: string): number | null {
+  const v = input?.[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
 /** A recipient's display label: prefer the name, else the bare address. */

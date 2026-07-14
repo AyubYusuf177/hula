@@ -43,13 +43,19 @@ const FAKE_EVENT: NormalizedCalendarEvent = {
   calendarId: "primary",
   summary: "Fake Standup",
   location: null,
+  description: null,
   start: "2026-07-11T09:00:00Z",
   end: "2026-07-11T09:15:00Z",
   allDay: false,
   status: "confirmed",
   htmlLink: null,
   attendeeCount: 2,
+  // Section 18 fields.
+  attendees: [],
   organizerEmail: null,
+  timeZone: null,
+  conference: null,
+  isRecurringMaster: false,
   source: "google_calendar",
 };
 

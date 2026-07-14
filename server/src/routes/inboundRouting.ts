@@ -1,7 +1,14 @@
 import { handleActionConfirmation, handlePendingProposalReprompt } from "../actions/confirmations";
 import { handleActionIntent } from "../actions/detect";
 import { handleCalendarQuestion } from "../integrations/providers/googleCalendar/calendarQuestion";
-import { handleCalendarWrite } from "../integrations/providers/googleCalendar/calendarActions";
+import {
+  handleCalendarUndo,
+  handleCalendarWrite,
+} from "../integrations/providers/googleCalendar/calendarActions";
+import {
+  handleCalendarAvailability,
+  handleCalendarFlexibleRead,
+} from "../integrations/providers/googleCalendar/calendarReads";
 import {
   handleGmailClarification,
   handleGmailDraftFollowup,
@@ -52,10 +59,13 @@ export interface InboundRouterDeps {
   gmailDraftFollowup?: Handler;
   gmailDraftLifecycle?: Handler;
   gmailCommand?: Handler;
+  calendarUndo?: Handler;
   calendarWrite?: Handler;
   gmailWrite?: Handler;
   actionIntent?: Handler;
+  calendarAvailability?: Handler;
   calendar?: Handler;
+  calendarRead?: Handler;
   gmailReadOne?: Handler;
   gmailSummary?: Handler;
   gmailSearch?: Handler;
@@ -91,6 +101,18 @@ export interface RoutedReply {
  *    only takes what it declines ("summarise them", "which of these need me?").
  *  - `gmailSearch` precedes `gmailQuestion` so a qualified search isn't swallowed by
  *    the generic "latest emails" intent.
+ *  - `calendarUndo` FOLLOWS `gmailCommand` (Section 18) so Gmail's own undo keeps
+ *    priority for "undo that" after an email action; the Calendar undo only takes
+ *    it when Gmail has nothing to reverse. It declines unless a VERIFIED calendar
+ *    create is there to invert, so it can never swallow an ordinary message.
+ *  - `calendarAvailability` precedes `calendar` (Section 18). "Am I free tomorrow at
+ *    3?" already matches the regex schedule path, which would answer it by LISTING
+ *    tomorrow's events — a different question, answered from a capped event list
+ *    rather than real free/busy. Availability has to win, or Hula infers
+ *    availability from data it knows may be incomplete.
+ *  - `calendarRead` FOLLOWS `calendar` (Section 18) for the mirror-image reason: the
+ *    regex path's fixed shapes are tested and free, so they keep priority, and the
+ *    model-backed reader only takes what they decline (arbitrary ranges, search).
  *  - `pendingReprompt` is LAST: while a confirmable action is pending, an
  *    unrecognised reply must never reach the brain, which could fabricate a success.
  */
@@ -103,10 +125,16 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     { name: "gmailDraftFollowup", run: deps.gmailDraftFollowup ?? handleGmailDraftFollowup },
     { name: "gmailDraftLifecycle", run: deps.gmailDraftLifecycle ?? handleGmailDraftLifecycle },
     { name: "gmailCommand", run: deps.gmailCommand ?? handleGmailCommand },
+    { name: "calendarUndo", run: deps.calendarUndo ?? handleCalendarUndo },
     { name: "calendarWrite", run: deps.calendarWrite ?? handleCalendarWrite },
     { name: "gmailWrite", run: deps.gmailWrite ?? handleGmailWrite },
     { name: "actionIntent", run: deps.actionIntent ?? handleActionIntent },
+    {
+      name: "calendarAvailability",
+      run: deps.calendarAvailability ?? handleCalendarAvailability,
+    },
     { name: "calendar", run: deps.calendar ?? handleCalendarQuestion },
+    { name: "calendarRead", run: deps.calendarRead ?? handleCalendarFlexibleRead },
     { name: "gmailReadOne", run: deps.gmailReadOne ?? handleGmailReadOne },
     { name: "gmailSummary", run: deps.gmailSummary ?? handleGmailSummary },
     { name: "gmailSearch", run: deps.gmailSearch ?? handleGmailSearch },

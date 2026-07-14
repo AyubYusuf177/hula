@@ -1,7 +1,8 @@
 import { getUserTimezone } from "../../../reminders/reminders";
 import { logger } from "../../../utils/logger";
 import { GoogleCalendarError, isReconnectReason } from "./client";
-import { fetchUpcomingGoogleCalendarEvents } from "./events";
+import { dedupeRecurringSeries, fetchUpcomingGoogleCalendarEvents } from "./events";
+import { recordCalendarSelection, type CalendarContextStore } from "./calendarContext";
 import { GOOGLE_CALENDAR_PROVIDER } from "./types";
 import type { CalendarRange, NormalizedCalendarEvent } from "./types";
 
@@ -208,17 +209,34 @@ function maxResultsFor(intent: CalendarRange): number {
 export async function handleCalendarQuestion(
   userId: string,
   text: string | undefined,
+  store: CalendarContextStore = {},
 ): Promise<CalendarQuestionResult> {
   const intent = classifyCalendarQuestion(text);
   if (intent === "none") return { handled: false };
 
   try {
     const timezone = await getUserTimezone(userId);
-    const events = await fetchUpcomingGoogleCalendarEvents(userId, {
+    const fetched = await fetchUpcomingGoogleCalendarEvents(userId, {
       range: intent,
       maxResults: maxResultsFor(intent),
       timezone,
     });
+    // A multi-day range expands a recurring series into one line per occurrence
+    // (`singleEvents=true`), which buries the rest of the week under five copies
+    // of one standup. A single day legitimately shows every occurrence on it.
+    const events = intent === "week" ? dedupeRecurringSeries(fetched) : fetched;
+
+    // Remember the list we're about to show, so a follow-up ("cancel the second
+    // one") resolves against exactly these ids in exactly this order. Best-effort
+    // — losing it costs the shortcut, never the answer.
+    try {
+      await recordCalendarSelection(userId, events, store);
+    } catch (err) {
+      logger.error("googleCalendar.selection record failed", {
+        reason: err instanceof Error ? err.message : "unknown error",
+      });
+    }
+
     return {
       handled: true,
       intent,

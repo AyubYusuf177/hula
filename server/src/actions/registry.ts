@@ -125,9 +125,14 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     actionId: "calendar.createEvent",
     category: "calendar",
     displayName: "Create calendar event",
-    description: "Create a new event on the user's calendar.",
+    description:
+      "Create a new event on the user's calendar (Section 18: timed or all-day, with " +
+      "optional location, description, attendees, reminders, and a genuine Google Meet " +
+      "conference). Every field arrives ALREADY RESOLVED from a confirmed proposal.",
     providerTypes: ["google_calendar"],
     requiredCapabilities: ["write_calendar_events"],
+    // Google Meet conferences are created through `events.insert` itself, so the
+    // SAME calendar.events scope authorises them. There is no separate Meet scope.
     requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
     riskLevel: "write",
     confirmationRequired: true,
@@ -135,11 +140,40 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     enabled: true,
     inputSchema: [
       { name: "title", type: "string", required: true, description: "Event title." },
-      { name: "start", type: "datetime", required: true, description: "Start time (ISO 8601)." },
-      { name: "end", type: "datetime", required: false, description: "End time (ISO 8601)." },
+      { name: "startIso", type: "datetime", required: false, description: "Start instant (ISO 8601). Required unless allDay." },
+      { name: "endIso", type: "datetime", required: false, description: "End instant (ISO 8601). Required unless allDay." },
+      { name: "allDay", type: "boolean", required: false, description: "True for an all-day event." },
+      { name: "startDate", type: "string", required: false, description: "All-day start (YYYY-MM-DD)." },
+      { name: "endDate", type: "string", required: false, description: "All-day end (YYYY-MM-DD, EXCLUSIVE per Google)." },
       { name: "location", type: "string", required: false, description: "Optional location." },
+      { name: "description", type: "string", required: false, description: "Optional description." },
+      {
+        name: "attendees",
+        type: "string[]",
+        required: false,
+        description:
+          "Verified attendee addresses. Only ever addresses the user typed — never inferred from a name.",
+      },
+      { name: "reminderMinutes", type: "number", required: false, description: "Popup reminder, minutes before start." },
+      {
+        name: "conferenceRequestId",
+        type: "string",
+        required: false,
+        description:
+          "Present when a Google Meet was requested. Generated ONCE at proposal time and replayed, so a duplicate confirmation reuses the same conference instead of allocating a second one.",
+      },
+      {
+        name: "notifyGuests",
+        type: "boolean",
+        required: false,
+        description: "Whether Google emails the guests. Only true after a preview that said so.",
+      },
     ],
-    examples: ["schedule gym tomorrow at 7pm", "book a call with Sam on Friday"],
+    examples: [
+      "schedule gym tomorrow at 7pm",
+      "book a call with Sam on Friday",
+      "book an hour with rob@x.com Monday as a Google Meet",
+    ],
     userFacingDescription:
       "I couldn’t set that event up just now — mind trying again in a moment?",
   },
@@ -147,7 +181,10 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     actionId: "calendar.updateEvent",
     category: "calendar",
     displayName: "Update calendar event",
-    description: "Update an existing event on the user's calendar.",
+    description:
+      "Update an existing event (Section 18: reschedule, change duration, rename, " +
+      "location, description, add/remove attendees, reminders, add a Google Meet). " +
+      "The target id and every value arrive ALREADY RESOLVED from a confirmed proposal.",
     providerTypes: ["google_calendar"],
     requiredCapabilities: ["write_calendar_events"],
     requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
@@ -156,12 +193,36 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     implemented: true,
     enabled: true,
     inputSchema: [
-      { name: "eventId", type: "string", required: true, description: "Event to update." },
-      { name: "title", type: "string", required: false, description: "New title." },
-      { name: "start", type: "datetime", required: false, description: "New start (ISO 8601)." },
-      { name: "end", type: "datetime", required: false, description: "New end (ISO 8601)." },
+      {
+        name: "eventId",
+        type: "string",
+        required: true,
+        description:
+          "Event to update. For a recurring series this is the INSTANCE id (`this_event`) or the MASTER id (`entire_series`), chosen at proposal time from an explicit user answer.",
+      },
+      { name: "newTitle", type: "string", required: false, description: "New title." },
+      { name: "startIso", type: "datetime", required: false, description: "New start (ISO 8601)." },
+      { name: "endIso", type: "datetime", required: false, description: "New end (ISO 8601)." },
+      { name: "newLocation", type: "string", required: false, description: "New location." },
+      { name: "newDescription", type: "string", required: false, description: "New description." },
+      {
+        name: "attendees",
+        type: "string[]",
+        required: false,
+        description:
+          "The COMPLETE attendee list. Google's PATCH replaces the array rather than merging, so the proposal merges add/remove against the event's real guests first.",
+      },
+      { name: "reminderMinutes", type: "number", required: false, description: "Popup reminder, minutes before start." },
+      { name: "conferenceRequestId", type: "string", required: false, description: "Present when adding a Google Meet." },
+      { name: "recurrenceScope", type: "string", required: false, description: "`this_event` or `entire_series` — never guessed." },
+      { name: "notifyGuests", type: "boolean", required: false, description: "Whether Google emails the guests about the change." },
     ],
-    examples: ["move my 3pm to 4pm", "rename tomorrow's meeting"],
+    examples: [
+      "move my 3pm to 4pm",
+      "rename tomorrow's meeting",
+      "make it a Google Meet",
+      "move it back thirty minutes",
+    ],
     userFacingDescription:
       "I couldn’t change that event just now — mind trying again in a moment?",
   },
@@ -169,7 +230,10 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     actionId: "calendar.cancelEvent",
     category: "calendar",
     displayName: "Cancel calendar event",
-    description: "Cancel/delete an existing event on the user's calendar.",
+    description:
+      "Cancel/delete an existing event, including a Google Meet event, through the " +
+      "normal confirmation + receipt path. Deletion is VERIFIED by re-reading the " +
+      "event (Section 18) — a 2xx alone is not reported as gone.",
     providerTypes: ["google_calendar"],
     requiredCapabilities: ["write_calendar_events"],
     requiredScopes: ["https://www.googleapis.com/auth/calendar.events"],
@@ -178,9 +242,17 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     implemented: true,
     enabled: true,
     inputSchema: [
-      { name: "eventId", type: "string", required: true, description: "Event to cancel." },
+      {
+        name: "eventId",
+        type: "string",
+        required: true,
+        description:
+          "Event to cancel. The INSTANCE id deletes one occurrence; the MASTER id deletes the whole series — chosen at proposal time from an explicit user answer, never guessed.",
+      },
+      { name: "recurrenceScope", type: "string", required: false, description: "`this_event` or `entire_series`." },
+      { name: "notifyGuests", type: "boolean", required: false, description: "Whether Google emails the guests a cancellation." },
     ],
-    examples: ["cancel my 2pm", "delete tomorrow's dentist appointment"],
+    examples: ["cancel my 2pm", "delete tomorrow's dentist appointment", "only cancel this occurrence"],
     userFacingDescription:
       "I couldn’t cancel that event just now — mind trying again in a moment?",
   },

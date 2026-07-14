@@ -258,10 +258,17 @@ check("order: the cascade order is pinned", () => {
     "gmailDraftFollowup",
     "gmailDraftLifecycle",
     "gmailCommand",
+    // Section 18: after gmailCommand, so Gmail's undo keeps priority.
+    "calendarUndo",
     "calendarWrite",
     "gmailWrite",
     "actionIntent",
+    // Section 18: availability BEFORE the regex calendar path (which would
+    // otherwise answer "am I free at 3?" by listing the day's events), and the
+    // model-backed flexible reader AFTER it (so the tested fixed shapes win).
+    "calendarAvailability",
     "calendar",
+    "calendarRead",
     "gmailReadOne",
     "gmailSummary",
     "gmailSearch",
@@ -1074,6 +1081,13 @@ asyncCheck("preserved: the Calendar confirmation flow still works end to end", a
                 status: "confirmed",
                 htmlLink: null,
                 attendeeCount: null,
+                // Section 18 fields. Real events always carry these — a fixture that
+                // omits them is not a realistic event and hides formatting bugs.
+                description: null,
+                attendees: [],
+                timeZone: null,
+                conference: null,
+                isRecurringMaster: false,
                 organizerEmail: null,
                 source: "google_calendar",
               };

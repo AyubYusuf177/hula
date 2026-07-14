@@ -87,6 +87,13 @@ function created(id: string): NormalizedCalendarEvent {
     status: "confirmed",
     htmlLink: null,
     attendeeCount: null,
+    // Section 18 fields. Real events always carry these — a fixture that
+    // omits them is not a realistic event and hides formatting bugs.
+    description: null,
+    attendees: [],
+    timeZone: null,
+    conference: null,
+    isRecurringMaster: false,
     organizerEmail: null,
     source: "google_calendar",
   };

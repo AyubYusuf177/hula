@@ -76,6 +76,13 @@ function ev(
     status: "confirmed",
     htmlLink: null,
     attendeeCount: null,
+    // Section 18 fields. Real events always carry these — a fixture that
+    // omits them is not a realistic event and hides formatting bugs.
+    description: null,
+    attendees: [],
+    timeZone: null,
+    conference: null,
+    isRecurringMaster: false,
     organizerEmail: null,
     recurringEventId,
     source: "google_calendar",
@@ -479,15 +486,20 @@ asyncCheck("update: multiple matches -> clarify (nothing proposed)", async () =>
   assert.equal(calls.proposed.length, 0, "an ambiguous target must never be proposed");
 });
 
-asyncCheck("update: a recurring match asks for clarification (nothing proposed)", async () => {
+asyncCheck("update: a recurring match asks WHICH SCOPE (nothing proposed)", async () => {
+  // Section 18 replaces Section 15's blanket refusal with an explicit scope
+  // question. The protection is not weakened — it is strictly stronger: without
+  // an explicit scope, nothing is proposed and nothing can be confirmed. What
+  // changed is that the user now has a way to say what they meant instead of
+  // being told to rephrase.
   const recurring = ev("inst_1", "Standup", "2026-07-14T13:00:00-04:00", "2026-07-14T13:15:00-04:00");
   const { deps, calls } = makeDeps({
     find: async () => [{ ...recurring, recurringEventId: "series_1" }],
     extract: fixedExtract({ action: "update", title: "Standup", date: "2026-07-14", newTime: "14:00" }),
   });
   const r = await handleCalendarWrite("u", "move standup to 2pm", deps);
-  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.recurring);
-  assert.equal(calls.proposed.length, 0, "a recurring series must never be proposed");
+  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.recurrenceScope);
+  assert.equal(calls.proposed.length, 0, "a recurring series must never be proposed unscoped");
 });
 
 // --- DELETE flow ---------------------------------------------------------
@@ -534,15 +546,15 @@ asyncCheck("delete: multiple matches -> clarify (nothing proposed)", async () =>
   assert.equal(calls.proposed.length, 0, "an ambiguous deletion must never be proposed");
 });
 
-asyncCheck("delete: a recurring match asks for clarification (never touches the series)", async () => {
+asyncCheck("delete: a recurring match asks WHICH SCOPE (never touches the series)", async () => {
   const recurring = ev("inst_1", "Standup", "2026-07-14T13:00:00-04:00", "2026-07-14T13:15:00-04:00");
   const { deps, calls } = makeDeps({
     find: async () => [{ ...recurring, recurringEventId: "series_1" }],
     extract: fixedExtract({ action: "delete", title: "Standup", date: "2026-07-14" }),
   });
   const r = await handleCalendarWrite("u", "cancel standup tomorrow", deps);
-  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.recurring);
-  assert.equal(calls.proposed.length, 0, "a recurring series must never be proposed");
+  assert.equal(r.reply, CALENDAR_WRITE_REPLIES.recurrenceScope);
+  assert.equal(calls.proposed.length, 0, "a recurring series must never be proposed unscoped");
 });
 
 // --- Capability gating & fall-through ------------------------------------

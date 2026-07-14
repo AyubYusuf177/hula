@@ -6,10 +6,16 @@ import {
 } from "./client";
 import type { FetchLike } from "./oauth";
 import { normalizeGoogleEvent } from "./events";
-import { type NormalizedCalendarEvent, type RawGoogleEvent } from "./types";
+import { buildConferenceCreateRequest } from "./conference";
+import {
+  CALENDAR_CONFERENCE_DATA_VERSION,
+  type NormalizedCalendarEvent,
+  type RawGoogleEvent,
+} from "./types";
 
 /**
- * Google Calendar event WRITES (Section 15) — create / update / delete / find.
+ * Google Calendar event WRITES (Sections 15 + 18) — create / update / delete /
+ * find / re-fetch.
  *
  * These are the ONLY functions that mutate a user's calendar. Every Google API
  * call stays inside this provider layer (never in a webhook route). Each call
@@ -30,12 +36,36 @@ async function requireConnectionId(userId: string): Promise<string> {
   return connection.id;
 }
 
-/** A single point-in-time with a timezone, as Google's event API expects. */
+/**
+ * A single point-in-time, as Google's event API expects. EXACTLY ONE of
+ * `dateTime` (a timed event) or `date` (an all-day event) may be set — Google
+ * rejects a start/end carrying both, and the distinction is what makes an event
+ * all-day.
+ */
 export interface EventDateTime {
   /** RFC3339 timestamp WITH offset, e.g. "2026-07-14T13:00:00-04:00". */
-  dateTime: string;
+  dateTime?: string;
+  /** `YYYY-MM-DD` for an all-day event. Mutually exclusive with `dateTime`. */
+  date?: string;
   /** IANA timezone, e.g. "America/New_York". Optional but recommended. */
   timeZone?: string;
+}
+
+/** How Google should notify attendees about a change. */
+export type SendUpdatesMode = "all" | "externalOnly" | "none";
+
+/** An attendee to invite, as a verified address. */
+export interface EventAttendeeInput {
+  email: string;
+  optional?: boolean;
+}
+
+/** A reminder override on the event. */
+export interface EventReminderInput {
+  /** Google supports "email" and "popup". */
+  method: "email" | "popup";
+  /** Minutes before the event start (Google caps at 40320 = 4 weeks). */
+  minutes: number;
 }
 
 /** The safe, whitelisted fields a create/update may set. */
@@ -45,30 +75,81 @@ export interface CalendarEventWriteFields {
   description?: string;
   start?: EventDateTime;
   end?: EventDateTime;
+  /**
+   * The COMPLETE attendee list. Google's PATCH replaces the whole array rather
+   * than merging, so a caller adding one person must send everyone — the
+   * resolver above builds the full list precisely for that reason.
+   */
+  attendees?: EventAttendeeInput[];
+  /** Reminder overrides. An empty array means "no reminders" (not "default"). */
+  reminders?: EventReminderInput[];
+  /**
+   * Ask Google to allocate a NEW Meet. Carries the caller-generated, replayable
+   * `requestId`. Requires `conferenceDataVersion=1` on the request, which
+   * `createCalendarEvent`/`updateCalendarEvent` set whenever this is present.
+   */
+  addConferenceRequestId?: string;
+}
+
+/** Per-call options for a write. */
+export interface CalendarWriteOptions {
+  /**
+   * Whether Google emails the attendees. Defaults to `none` — silence is the
+   * safe default, and the caller opts in explicitly ONLY after the user has
+   * confirmed a preview that told them invitations would go out.
+   */
+  sendUpdates?: SendUpdatesMode;
+  calendarId?: string;
+  fetchImpl?: FetchLike;
 }
 
 /**
- * PURE: build the Google event request body from safe fields. Only whitelisted
- * keys are ever emitted, and `undefined` fields are dropped so a PATCH never
- * clears a field the user didn't ask to change (patch semantics preserve the
- * rest). Never includes attendees, conferencing, or any field we don't manage.
+ * PURE: build the Google event request body from safe fields.
+ *
+ * Only whitelisted keys are ever emitted, and `undefined` fields are DROPPED so a
+ * PATCH never clears a field the user didn't ask to change (patch semantics
+ * preserve the rest). The distinction between "absent" and "null" is the whole
+ * game here: emitting `location: null` would wipe a location the user never
+ * mentioned.
  */
 export function buildEventBody(fields: CalendarEventWriteFields): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (fields.summary !== undefined) body.summary = fields.summary;
   if (fields.location !== undefined) body.location = fields.location;
   if (fields.description !== undefined) body.description = fields.description;
-  if (fields.start !== undefined) {
-    body.start = fields.start.timeZone
-      ? { dateTime: fields.start.dateTime, timeZone: fields.start.timeZone }
-      : { dateTime: fields.start.dateTime };
+  if (fields.start !== undefined) body.start = buildEventDateTime(fields.start);
+  if (fields.end !== undefined) body.end = buildEventDateTime(fields.end);
+  if (fields.attendees !== undefined) {
+    body.attendees = fields.attendees.map((a) =>
+      a.optional ? { email: a.email, optional: true } : { email: a.email },
+    );
   }
-  if (fields.end !== undefined) {
-    body.end = fields.end.timeZone
-      ? { dateTime: fields.end.dateTime, timeZone: fields.end.timeZone }
-      : { dateTime: fields.end.dateTime };
+  if (fields.reminders !== undefined) {
+    // `useDefault:false` is REQUIRED for overrides to take effect — with it true
+    // Google ignores the array entirely and silently applies calendar defaults.
+    body.reminders = {
+      useDefault: false,
+      overrides: fields.reminders.map((r) => ({ method: r.method, minutes: r.minutes })),
+    };
+  }
+  if (fields.addConferenceRequestId !== undefined) {
+    body.conferenceData = buildConferenceCreateRequest(fields.addConferenceRequestId);
   }
   return body;
+}
+
+/**
+ * PURE: emit a Google start/end. An all-day event uses `date` ALONE — including
+ * a `dateTime` alongside it makes Google reject the request.
+ */
+function buildEventDateTime(dt: EventDateTime): Record<string, unknown> {
+  if (dt.date !== undefined) {
+    // All-day: `timeZone` is meaningless against a bare date, so it is omitted.
+    return { date: dt.date };
+  }
+  return dt.timeZone
+    ? { dateTime: dt.dateTime, timeZone: dt.timeZone }
+    : { dateTime: dt.dateTime };
 }
 
 /**
@@ -85,7 +166,7 @@ export function requireEventReceipt(
   operation: "create" | "update",
   expectedId?: string,
 ): NormalizedCalendarEvent {
-  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  const id = typeof raw?.id === "string" ? raw.id.trim() : "";
   if (!id) {
     throw new GoogleCalendarError(
       "malformed_provider_response",
@@ -108,23 +189,39 @@ export function requireEventReceipt(
   return normalizeGoogleEvent(raw, DEFAULT_CALENDAR_ID);
 }
 
+/** PURE: the query params a write needs (conference version + notifications). */
+export function buildWriteQuery(
+  fields: CalendarEventWriteFields,
+  options: CalendarWriteOptions,
+): Record<string, string> {
+  const query: Record<string, string> = {};
+  // Without this, Google IGNORES conferenceData and returns a normal event —
+  // a 200 for a request that silently did not do what was asked.
+  if (fields.addConferenceRequestId !== undefined) {
+    query.conferenceDataVersion = String(CALENDAR_CONFERENCE_DATA_VERSION);
+  }
+  query.sendUpdates = options.sendUpdates ?? "none";
+  return query;
+}
+
 /**
- * Create an event on the user's primary calendar. Returns the normalized event,
- * but ONLY after Google confirms it with a real event id — a malformed response
- * throws rather than resolving to a fabricated success.
+ * Create an event on the user's calendar. Returns the normalized event, but ONLY
+ * after Google confirms it with a real event id — a malformed response throws
+ * rather than resolving to a fabricated success.
  */
 export async function createCalendarEvent(
   userId: string,
   fields: CalendarEventWriteFields,
-  fetchImpl?: FetchLike,
+  options: CalendarWriteOptions = {},
 ): Promise<NormalizedCalendarEvent> {
   const connectionId = await requireConnectionId(userId);
+  const calendarId = options.calendarId ?? DEFAULT_CALENDAR_ID;
   const raw = await googleCalendarRequestForConnection<RawGoogleEvent>(
     connectionId,
     "POST",
-    `/calendars/${encodeURIComponent(DEFAULT_CALENDAR_ID)}/events`,
-    { body: buildEventBody(fields) },
-    fetchImpl,
+    `/calendars/${encodeURIComponent(calendarId)}/events`,
+    { query: buildWriteQuery(fields, options), body: buildEventBody(fields) },
+    options.fetchImpl,
   );
   return requireEventReceipt(raw, "create");
 }
@@ -138,21 +235,22 @@ export async function updateCalendarEvent(
   userId: string,
   eventId: string,
   fields: CalendarEventWriteFields,
-  fetchImpl?: FetchLike,
+  options: CalendarWriteOptions = {},
 ): Promise<NormalizedCalendarEvent> {
   const connectionId = await requireConnectionId(userId);
+  const calendarId = options.calendarId ?? DEFAULT_CALENDAR_ID;
   const raw = await googleCalendarRequestForConnection<RawGoogleEvent>(
     connectionId,
     "PATCH",
-    `/calendars/${encodeURIComponent(DEFAULT_CALENDAR_ID)}/events/${encodeURIComponent(eventId)}`,
-    { body: buildEventBody(fields) },
-    fetchImpl,
+    `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    { query: buildWriteQuery(fields, options), body: buildEventBody(fields) },
+    options.fetchImpl,
   );
   return requireEventReceipt(raw, "update", eventId);
 }
 
 /**
- * Delete an event by id from the user's primary calendar.
+ * Delete an event by id from the user's calendar.
  *
  * Success is established by Google's own response, never assumed: the client
  * throws a classified error on any non-2xx (404 → `calendar_not_found`, 403 →
@@ -164,16 +262,74 @@ export async function updateCalendarEvent(
 export async function deleteCalendarEvent(
   userId: string,
   eventId: string,
-  fetchImpl?: FetchLike,
+  options: CalendarWriteOptions = {},
 ): Promise<void> {
   const connectionId = await requireConnectionId(userId);
+  const calendarId = options.calendarId ?? DEFAULT_CALENDAR_ID;
   await googleCalendarRequestForConnection<Record<string, never>>(
     connectionId,
     "DELETE",
-    `/calendars/${encodeURIComponent(DEFAULT_CALENDAR_ID)}/events/${encodeURIComponent(eventId)}`,
-    {},
-    fetchImpl,
+    `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    { query: { sendUpdates: options.sendUpdates ?? "none" } },
+    options.fetchImpl,
   );
+}
+
+/**
+ * Re-fetch ONE event by id (Section 18) — the postcondition read.
+ *
+ * A write's own response is Google telling us what it believes it did. This is a
+ * SEPARATE read that asks what is actually on the calendar now, which is what
+ * lets a caller verify a change landed rather than trusting the echo.
+ */
+export async function getCalendarEvent(
+  userId: string,
+  eventId: string,
+  options: CalendarWriteOptions = {},
+): Promise<NormalizedCalendarEvent> {
+  const connectionId = await requireConnectionId(userId);
+  const calendarId = options.calendarId ?? DEFAULT_CALENDAR_ID;
+  const raw = await googleCalendarGetForConnection<RawGoogleEvent>(
+    connectionId,
+    `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    {},
+    options.fetchImpl,
+  );
+  const id = typeof raw?.id === "string" ? raw.id.trim() : "";
+  if (!id) {
+    throw new GoogleCalendarError(
+      "malformed_provider_response",
+      "Google Calendar returned no event id on re-fetch",
+    );
+  }
+  return normalizeGoogleEvent(raw, calendarId);
+}
+
+/**
+ * Whether an event is GONE from the user's calendar (Section 18) — the delete
+ * postcondition.
+ *
+ * Google keeps a deleted event readable for a while with `status: "cancelled"`
+ * rather than 404-ing immediately, so "it 404s" is too narrow a test and would
+ * report a successful delete as unverified. Both a `calendar_not_found` (404 or
+ * 410) and a `cancelled` status are genuine proof of deletion. Any OTHER error
+ * is NOT proof of anything and propagates — an unreachable Google must never be
+ * read as "well, it's probably deleted".
+ */
+export async function verifyEventDeleted(
+  userId: string,
+  eventId: string,
+  options: CalendarWriteOptions = {},
+): Promise<boolean> {
+  try {
+    const event = await getCalendarEvent(userId, eventId, options);
+    return event.status === "cancelled";
+  } catch (err) {
+    if (err instanceof GoogleCalendarError && err.reason === "calendar_not_found") {
+      return true;
+    }
+    throw err;
+  }
 }
 
 /** Options for finding candidate events to update/delete. */
@@ -186,19 +342,22 @@ export interface FindEventsOptions {
   query?: string;
   /** Cap on results (defaults small — we only need to detect ambiguity). */
   maxResults?: number;
+  calendarId?: string;
   fetchImpl?: FetchLike;
 }
 
 /**
- * Find events in a NARROW time window (single events, expanded from recurrence),
+ * Find events in a time window (single events, expanded from recurrence),
  * optionally filtered by Google's free-text `q`. Read-only — used to resolve the
- * one event an update/delete refers to, and to detect ambiguity (>1 match).
+ * one event an update/delete refers to, to detect ambiguity (>1 match), and to
+ * back event search.
  */
 export async function findCalendarEvents(
   userId: string,
   options: FindEventsOptions,
 ): Promise<NormalizedCalendarEvent[]> {
   const connectionId = await requireConnectionId(userId);
+  const calendarId = options.calendarId ?? DEFAULT_CALENDAR_ID;
   const query: Record<string, string> = {
     singleEvents: "true",
     orderBy: "startTime",
@@ -210,10 +369,10 @@ export async function findCalendarEvents(
 
   const data = await googleCalendarGetForConnection<{ items?: RawGoogleEvent[] }>(
     connectionId,
-    `/calendars/${encodeURIComponent(DEFAULT_CALENDAR_ID)}/events`,
+    `/calendars/${encodeURIComponent(calendarId)}/events`,
     query,
     options.fetchImpl,
   );
   const items = Array.isArray(data.items) ? data.items : [];
-  return items.map((raw) => normalizeGoogleEvent(raw, DEFAULT_CALENDAR_ID));
+  return items.map((raw) => normalizeGoogleEvent(raw, calendarId));
 }

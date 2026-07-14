@@ -9,6 +9,7 @@ import {
 } from "../integrations/connections";
 import { storeCredentialSecrets } from "../integrations/credentials";
 import { consumeOAuthState, createOAuthState } from "../integrations/oauthState";
+import { resolveOAuthCallbackReplay } from "../integrations/oauthReplay";
 import {
   GoogleOAuthConfigError,
   buildAuthorizationUrl,
@@ -81,8 +82,14 @@ function resultPage(input: {
   const button = safeUrl
     ? `<a class="btn" href="${safeUrl}">Return to Hula</a>`
     : "";
+  // `location.replace` rather than `location.href`: it does NOT push a history
+  // entry, so dismissing the "Open in Hula?" prompt can't leave the browser able
+  // to restore/back onto this URL and re-issue the callback GET — one real source
+  // of the duplicate callback. This reduces the double request; it does not rely
+  // on eliminating it, because a bfcache restore or prefetch can still re-issue a
+  // GET. Correctness under replay is handled server-side (see `oauthReplay.ts`).
   const autoRedirect = safeUrl
-    ? `<script>setTimeout(function(){try{window.location.href=${JSON.stringify(input.returnUrl)};}catch(e){}},400);</script>`
+    ? `<script>setTimeout(function(){try{window.location.replace(${JSON.stringify(input.returnUrl)});}catch(e){}},400);</script>`
     : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtmlAttr(input.title)}</title><style>
 :root{color-scheme:dark}
@@ -241,9 +248,26 @@ googleCalendarRouter.get(
     }
 
     try {
-      // Validate + consume the anti-CSRF state (single use).
+      // Validate + consume the anti-CSRF state (single use). This atomic claim is
+      // still the ONLY path that can reach a token exchange.
       const consumed = await consumeOAuthState(state, GOOGLE_CALENDAR_PROVIDER);
       if (!consumed) {
+        // The state didn't claim. Before calling this a failure, check whether it
+        // is an exact replay of a callback that ALREADY SUCCEEDED — the real
+        // device bug, where the browser re-issued the same GET and the error page
+        // landed on top of a genuine connection. This proves the outcome against
+        // the connection itself; it performs no exchange and writes nothing.
+        const replay = await resolveOAuthCallbackReplay(state, GOOGLE_CALENDAR_PROVIDER);
+        if (replay) {
+          logger.info("googleCalendar.callback replayed after success", {
+            willReturnToApp: Boolean(replay.appReturnUrl),
+          });
+          res
+            .status(200)
+            .type("html")
+            .send(successPage(sanitizeAppReturnUrl(replay.appReturnUrl)));
+          return;
+        }
         logger.info("googleCalendar.callback rejected state");
         res.status(400).type("html").send(errorPage(null));
         return;

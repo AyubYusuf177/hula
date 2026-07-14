@@ -221,15 +221,19 @@ check("range: next is open-ended (no timeMax)", () => {
 
 // --- Event normalization (raw payload stripped) --------------------------
 
-check("normalize: keeps only safe fields, drops description + raw payload", () => {
-  const raw: RawGoogleEvent & { description?: string; hangoutLink?: string } = {
+check("normalize: keeps only whitelisted safe fields, drops raw payload", () => {
+  const raw: RawGoogleEvent & { hangoutLink?: string; etag?: string } = {
     id: "evt1",
     status: "confirmed",
     summary: "Dentist",
-    description: "SECRET personal medical note",
+    description: "Bring the referral letter",
     location: "123 Main St",
     htmlLink: "https://calendar.google.com/evt1",
+    // Non-whitelisted raw fields. `hangoutLink` is Google's DEPRECATED Meet
+    // field: Section 18 reads conferencing STRICTLY from `conferenceData` entry
+    // points, so this must not become a Meet link by the back door.
     hangoutLink: "https://meet.google.com/xyz",
+    etag: "\"SECRETETAG\"",
     start: { dateTime: "2026-07-15T15:00:00-04:00" },
     end: { dateTime: "2026-07-15T16:00:00-04:00" },
     attendees: [{ email: "a@x.com" }, { email: "b@x.com" }],
@@ -243,11 +247,20 @@ check("normalize: keeps only safe fields, drops description + raw payload", () =
   assert.equal(norm.attendeeCount, 2);
   assert.equal(norm.organizerEmail, "me@x.com");
   assert.equal(norm.source, "google_calendar");
-  // The description and any non-whitelisted raw field must not survive.
+
+  // Section 18 CHANGE (deliberate, and narrow): `description` is now a
+  // whitelisted field. Section 11 dropped it to keep the read surface minimal,
+  // but Section 18 lets the user SET and CHANGE it, and an update preview has to
+  // show the real before-value — which it cannot do from a field we threw away.
+  // Normalization stays a strict whitelist; description simply joins it.
+  assert.equal(norm.description, "Bring the referral letter");
+
+  // Everything NOT on the whitelist must still be gone.
   const blob = JSON.stringify(norm);
-  assert.ok(!blob.includes("SECRET"), "description must be dropped");
   assert.ok(!blob.includes("hangoutLink"), "raw payload keys must be dropped");
-  assert.ok(!("description" in norm), "no description key");
+  assert.ok(!blob.includes("SECRETETAG"), "raw provider metadata must be dropped");
+  // The deprecated hangoutLink must NOT be promoted into a conference.
+  assert.equal(norm.conference, null, "no conferenceData -> no conference");
 });
 
 check("normalize: detects an all-day event from a date-only start", () => {
@@ -296,6 +309,13 @@ function timedEvent(summary: string, startIso: string): NormalizedCalendarEvent 
     status: "confirmed",
     htmlLink: null,
     attendeeCount: null,
+    // Section 18 fields. Real events always carry these — a fixture that
+    // omits them is not a realistic event and hides formatting bugs.
+    description: null,
+    attendees: [],
+    timeZone: null,
+    conference: null,
+    isRecurringMaster: false,
     organizerEmail: null,
     source: "google_calendar",
   };
