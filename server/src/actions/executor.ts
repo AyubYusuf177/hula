@@ -6,6 +6,15 @@ import {
 import { fetchUpcomingGoogleCalendarEvents } from "../integrations/providers/googleCalendar/events";
 import { formatCalendarAnswer } from "../integrations/providers/googleCalendar/calendarQuestion";
 import type { CalendarRange } from "../integrations/providers/googleCalendar/types";
+import { GmailError, isReconnectReason } from "../integrations/providers/gmail/client";
+import {
+  createGmailDraft,
+  sendGmailMessage,
+  type CreatedGmailDraft,
+  type GmailRawPayload,
+  type SentGmailMessage,
+} from "../integrations/providers/gmail/drafts";
+import { MimeError, buildGmailRawPayload } from "../integrations/providers/gmail/mime";
 import { buildActionPolicyContext } from "./context";
 import { evaluateActionForUser, type ActionPolicyContext } from "./policy";
 import { recordActionExecution, type ActionExecutionStatusValue } from "./executions";
@@ -43,6 +52,13 @@ export interface ActionExecutionResult {
   /** Honest, user-facing text to relay. Never contains tokens. */
   userMessage: string;
   executionId?: string;
+  /**
+   * SAFE provider receipt for a completed action — Gmail-issued ids only, never a
+   * token or raw payload. Present ONLY on a validated success (e.g. a created
+   * draft), so callers that persist a follow-up reference (see the Gmail
+   * last-draft context) can do so strictly from a real provider result.
+   */
+  receipt?: { draftId?: string; messageId?: string; threadId?: string };
 }
 
 /**
@@ -60,6 +76,15 @@ export interface ExecuteActionDeps {
   ) => Promise<NormalizedCalendarEvent[]>;
   getTimezone?: (userId: string) => Promise<string | undefined>;
   record?: typeof recordActionExecution;
+  /** Gmail draft/send provider fns — injected so tests never hit Gmail. */
+  createGmailDraft?: (
+    userId: string,
+    payload: GmailRawPayload,
+  ) => Promise<CreatedGmailDraft>;
+  sendGmailMessage?: (
+    userId: string,
+    payload: GmailRawPayload,
+  ) => Promise<SentGmailMessage>;
 }
 
 /** Generic stub reply for a defined-but-unimplemented action. */
@@ -164,6 +189,20 @@ export async function executeAction(
       };
     }
 
+    // Gmail draft creation / send (Section 16). The structured, ALREADY-RESOLVED
+    // recipient/thread fields arrive in `input` (from the Gmail-write service or a
+    // confirmed send proposal). The executor validates them, builds the MIME, and
+    // performs the provider write — it never resolves a recipient itself.
+    if (actionId === "email.createDraft" || actionId === "email.sendDraft") {
+      return await runGmailWrite(userId, actionId, input, policy.provider ?? "gmail", {
+        record,
+        proposalId: options.proposalId ?? null,
+        inputKeys,
+        createDraft: deps.createGmailDraft ?? createGmailDraft,
+        sendMessage: deps.sendGmailMessage ?? sendGmailMessage,
+      });
+    }
+
     // Allowed but no adapter wired (should not happen while only reads are
     // implemented) — stay honest and log it.
     const executionId = await record(userId, {
@@ -208,5 +247,171 @@ export async function executeAction(
         : "I ran into a problem trying to do that — mind trying again in a bit?",
       executionId,
     };
+  }
+}
+
+/** PURE: read a string field from redacted input, trimmed, or "". */
+function readStr(input: Record<string, unknown> | undefined, key: string): string {
+  const v = input?.[key];
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** A recipient's display label: prefer the name, else the bare address. */
+function recipientLabel(name: string, address: string): string {
+  return name ? name : address;
+}
+
+/** Honest replies for the Gmail write executor (never leak provider detail). */
+const GMAIL_EXEC_REPLIES = {
+  missingInfo: "I don’t have enough to send that — I’m missing the recipient, subject, or message.",
+  notConnected: "Your Gmail isn’t connected, so I can’t do that.",
+  reconnect: "I don’t have permission to draft or send on your Gmail yet — reconnect it in Hula.",
+  unavailable: "I couldn’t reach Gmail just now — mind trying again in a bit?",
+} as const;
+
+/**
+ * Execute a Gmail draft-create or send from ALREADY-RESOLVED structured input.
+ * Builds the MIME (pure), performs the provider write, and confirms ONLY from the
+ * real Gmail response — a thrown provider/MIME error never reports success. Never
+ * throws; returns a safe result + ledger entry.
+ */
+async function runGmailWrite(
+  userId: string,
+  actionId: "email.createDraft" | "email.sendDraft",
+  input: Record<string, unknown> | undefined,
+  provider: string,
+  ctx: {
+    record: typeof recordActionExecution;
+    proposalId: string | null;
+    inputKeys: string[];
+    createDraft: (userId: string, payload: GmailRawPayload) => Promise<CreatedGmailDraft>;
+    sendMessage: (userId: string, payload: GmailRawPayload) => Promise<SentGmailMessage>;
+  },
+): Promise<ActionExecutionResult> {
+  const to = readStr(input, "to");
+  const toName = readStr(input, "toName");
+  const subject = readStr(input, "subject");
+  const body = typeof input?.body === "string" ? input.body : "";
+  const isReply = input?.isReply === true;
+  const threadId = readStr(input, "threadId") || undefined;
+  const inReplyTo = readStr(input, "inReplyTo") || undefined;
+  const references = readStr(input, "references") || undefined;
+  const isSend = actionId === "email.sendDraft";
+
+  // A reply may keep the thread subject; a NEW message needs its own subject.
+  const missing = !to || body.trim().length === 0 || (!isReply && !subject);
+
+  let payload: GmailRawPayload;
+  try {
+    if (missing) throw new MimeError("empty_body", "missing required fields");
+    payload = buildGmailRawPayload(
+      { to, subject, body, inReplyTo, references },
+      threadId,
+    );
+  } catch (err) {
+    // Validation/MIME failure — never a false success.
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { inputKeys: ctx.inputKeys, isReply, isSend },
+      errorMessage: err instanceof MimeError ? `mime_${err.reason}` : "invalid_input",
+    });
+    return {
+      ok: false,
+      status: "failed",
+      actionId,
+      provider,
+      userMessage: GMAIL_EXEC_REPLIES.missingInfo,
+      executionId,
+    };
+  }
+
+  const label = recipientLabel(toName, to);
+  try {
+    if (isSend) {
+      const sent = await ctx.sendMessage(userId, payload);
+      // Validate the provider result before ANY success claim (Fix 1): a send with
+      // no Gmail-issued message id is not a confirmed send — treat it as a failure
+      // so Hula never says "sent" without a validated provider identifier.
+      if (!sent.messageId) {
+        throw new GmailError(
+          "malformed_provider_response",
+          "Gmail did not confirm the sent message",
+        );
+      }
+      const executionId = await ctx.record(userId, {
+        proposalId: ctx.proposalId,
+        provider,
+        actionId,
+        status: "succeeded",
+        requestSummary: { isReply, isSend },
+        // Ledger keeps only Gmail-issued ids — never recipient/subject/body.
+        resultSummary: { messageId: sent.messageId, threadId: sent.threadId },
+      });
+      return {
+        ok: true,
+        status: "succeeded",
+        actionId,
+        provider,
+        userMessage: isReply ? `Reply sent to ${label}.` : `Email sent to ${label}.`,
+        executionId,
+        receipt: { messageId: sent.messageId, threadId: sent.threadId },
+      };
+    }
+
+    const draft = await ctx.createDraft(userId, payload);
+    // Same validation for a draft: no Gmail-issued draft id means it isn't a
+    // confirmed draft — fail honestly rather than claim one was created.
+    if (!draft.draftId) {
+      throw new GmailError(
+        "malformed_provider_response",
+        "Gmail did not return a draft id",
+      );
+    }
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "succeeded",
+      requestSummary: { isReply, isSend },
+      resultSummary: { draftId: draft.draftId, threadId: draft.threadId },
+    });
+    const header = isReply ? "Reply draft created in Gmail." : "Draft created in Gmail.";
+    const subjectLine = isReply && subject.length === 0 ? "" : `\nSubject: ${subject}`;
+    return {
+      ok: true,
+      status: "succeeded",
+      actionId,
+      provider,
+      userMessage: `${header}\nTo: ${label}${subjectLine}`,
+      executionId,
+      receipt: {
+        draftId: draft.draftId,
+        messageId: draft.messageId,
+        threadId: draft.threadId,
+      },
+    };
+  } catch (err) {
+    const gmailErr = err instanceof GmailError ? err : null;
+    logger.error("action.gmailWrite failed", {
+      actionId,
+      errorCode: gmailErr?.reason ?? "unknown",
+      httpStatus: gmailErr?.httpStatus ?? null,
+    });
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { isReply, isSend },
+      errorMessage: gmailErr?.reason ?? "execution_failed",
+    });
+    let userMessage: string = GMAIL_EXEC_REPLIES.unavailable;
+    if (gmailErr?.reason === "not_connected") userMessage = GMAIL_EXEC_REPLIES.notConnected;
+    else if (gmailErr && (gmailErr.reason === "insufficient_scope" || isReconnectReason(gmailErr.reason)))
+      userMessage = GMAIL_EXEC_REPLIES.reconnect;
+    return { ok: false, status: "failed", actionId, provider, userMessage, executionId };
   }
 }

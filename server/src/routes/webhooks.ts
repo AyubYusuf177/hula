@@ -15,6 +15,7 @@ import type { SendblueInboundWebhook } from "../channels/sendblue/types";
 import type { InboundMessage } from "../channels/types";
 import { generateHulaReply } from "../ai/hulaBrain";
 import type { BrainMessage } from "../ai/hulaBrain";
+import { sanitizeBrainReply } from "../ai/operationalGuard";
 import { env } from "../config/env";
 import { recordInbound, recordOutbound } from "../db/persist";
 import { listRecentBrainMessages } from "../db/queries";
@@ -25,7 +26,16 @@ import { listConnectedProviderNames } from "../integrations/connections";
 import { handleCalendarQuestion } from "../integrations/providers/googleCalendar/calendarQuestion";
 import { handleCalendarWrite } from "../integrations/providers/googleCalendar/calendarActions";
 import { handleGmailQuestion } from "../integrations/providers/gmail/gmailQuestion";
-import { handleActionConfirmation } from "../actions/confirmations";
+import { handleGmailReadOne } from "../integrations/providers/gmail/gmailReadOne";
+import {
+  handleGmailClarification,
+  handleGmailDraftFollowup,
+  handleGmailWrite,
+} from "../integrations/providers/gmail/gmailActions";
+import {
+  handleActionConfirmation,
+  handlePendingProposalReprompt,
+} from "../actions/confirmations";
 import { handleActionIntent } from "../actions/detect";
 import { handleReminderCommand } from "../reminders/reminders";
 import type { HulaPromptContext } from "../ai/prompts";
@@ -166,7 +176,16 @@ async function generateBrainReply(
   }
 
   const { reply, usedFallback } = await generateHulaReply({ history, context });
-  return { reply, usedFallback, historyCount: history.length };
+
+  // Operational-honesty backstop (Section 16): the brain never holds an action
+  // receipt, so any completion claim it produces ("Reply sent to …") is a
+  // fabrication. Deterministic handlers (which DO carry receipts) never reach this
+  // path. If the brain fabricated a success, substitute an honest reply.
+  const sanitized = sanitizeBrainReply(reply);
+  if (sanitized.blocked) {
+    logger.warn("sendblue.webhook brain fabricated-success blocked");
+  }
+  return { reply: sanitized.text, usedFallback, historyCount: history.length };
 }
 
 /**
@@ -248,6 +267,39 @@ async function processInbound(message: InboundMessage): Promise<void> {
         ? await handleActionConfirmation(userId, message.content.text)
         : { handled: false as const };
 
+    // Gmail reply-target CLARIFICATION (Section 16 live-fix). When Hula listed
+    // several matching emails and asked "which one?", a short "2" / "option 2" /
+    // "the second one" / "actually 2" resolves against the EXACT thread it stored.
+    // Runs AFTER confirmations (so an existing send/confirm path is untouched) and
+    // only when a valid pending clarification exists AND the message reads as a
+    // selection; otherwise it falls through unchanged and never intercepts an
+    // ordinary number or unrelated message.
+    const gmailClarify =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply)
+        ? await handleGmailClarification(userId, message.content.text)
+        : { handled: false as const };
+
+    // Gmail DRAFT FOLLOW-UP (Section 16 live-fix) — "send the draft", "send it",
+    // "send the draft to Rob". After Hula creates a REAL Gmail draft it remembers a
+    // safe, expiring reference to it; this resolves that exact draft and sends the
+    // ACTUAL draft via Gmail's draft-send operation (never a reconstructed message,
+    // never a guessed id). Runs AFTER confirmation/clarification and BEFORE the
+    // Gmail write handler so "send the draft" is never re-extracted as a new
+    // compose or fabricated as a success by the brain. A bare "send it" with no
+    // stored draft falls through unchanged; an explicit "send the draft" with none
+    // is answered honestly.
+    const gmailDraftFollowup =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply) &&
+      !(gmailClarify.handled && gmailClarify.reply)
+        ? await handleGmailDraftFollowup(userId, message.content.text)
+        : { handled: false as const };
+
     // Calendar WRITES (Section 15) — "schedule lunch with Adam tomorrow at 1pm",
     // "move lunch with Adam to 2pm", "delete lunch with Adam tomorrow". These
     // create/update/delete real events on the user's connected Google Calendar via
@@ -260,21 +312,45 @@ async function processInbound(message: InboundMessage): Promise<void> {
       userId &&
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
-      !(confirmation.handled && confirmation.reply)
+      !(confirmation.handled && confirmation.reply) &&
+      !(gmailClarify.handled && gmailClarify.reply) &&
+      !(gmailDraftFollowup.handled && gmailDraftFollowup.reply)
         ? await handleCalendarWrite(userId, message.content.text)
         : { handled: false as const };
 
-    // Imperative action intents (Section 12) — "send an email to …", "create a
-    // task …". These map to typed Hula actions; email/task write/send actions are
-    // still STUBS, so the runtime replies HONESTLY that the action isn't enabled
-    // yet (and logs a blocked ledger entry) rather than pretending. Calendar
-    // writes are handled above, so they never reach here.
+    // Gmail WRITES (Section 16) — "send Rob an email saying …", "draft a reply to
+    // Rob's latest email". These create real Gmail drafts IMMEDIATELY, or — for an
+    // actual send — create a persisted Section 12 proposal that only a subsequent
+    // "yes" executes. Runs BEFORE the generic action-intent stub and the Gmail READ
+    // handler so an imperative "send/draft an email …" composes instead of being
+    // read as an inbox question or an "not enabled" stub. A read request ("send me
+    // the latest email from Rob") is NOT matched and falls through to the read
+    // path; if the model can't be reached this returns handled:false and falls
+    // through too.
+    const gmailWrite =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply) &&
+      !(gmailClarify.handled && gmailClarify.reply) &&
+      !(gmailDraftFollowup.handled && gmailDraftFollowup.reply) &&
+      !(calendarWrite.handled && calendarWrite.reply)
+        ? await handleGmailWrite(userId, message.content.text)
+        : { handled: false as const };
+
+    // Imperative action intents (Section 12) — "create a task …". These map to
+    // typed Hula actions; still-stubbed write/send actions reply HONESTLY that the
+    // action isn't enabled yet. Calendar and Gmail writes are handled above, so
+    // they never reach here.
     const actionIntent =
       userId &&
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
       !(confirmation.handled && confirmation.reply) &&
-      !(calendarWrite.handled && calendarWrite.reply)
+      !(gmailClarify.handled && gmailClarify.reply) &&
+      !(gmailDraftFollowup.handled && gmailDraftFollowup.reply) &&
+      !(calendarWrite.handled && calendarWrite.reply) &&
+      !(gmailWrite.handled && gmailWrite.reply)
         ? await handleActionIntent(userId, message.content.text)
         : { handled: false as const };
 
@@ -287,9 +363,32 @@ async function processInbound(message: InboundMessage): Promise<void> {
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
       !(confirmation.handled && confirmation.reply) &&
+      !(gmailClarify.handled && gmailClarify.reply) &&
+      !(gmailDraftFollowup.handled && gmailDraftFollowup.reply) &&
       !(calendarWrite.handled && calendarWrite.reply) &&
+      !(gmailWrite.handled && gmailWrite.reply) &&
       !(actionIntent.handled && actionIntent.reply)
         ? await handleCalendarQuestion(userId, message.content.text)
+        : { handled: false as const };
+
+    // Gmail READ-ONE / SUMMARISE-ONE (Section 16 / Fix 4) — "what does Rob's
+    // latest email say", "summarise Rob's most recent email". Resolves ONE newest
+    // matching message and answers strictly from its real body. Runs BEFORE the
+    // list handler so a specific-email content question is never answered with the
+    // inbox list; a plain list query ("what are my latest emails") isn't matched
+    // here and falls through to the list handler below.
+    const gmailReadOne =
+      userId &&
+      !(memory.handled && memory.reply) &&
+      !(reminder.handled && reminder.reply) &&
+      !(confirmation.handled && confirmation.reply) &&
+      !(gmailClarify.handled && gmailClarify.reply) &&
+      !(gmailDraftFollowup.handled && gmailDraftFollowup.reply) &&
+      !(calendarWrite.handled && calendarWrite.reply) &&
+      !(gmailWrite.handled && gmailWrite.reply) &&
+      !(actionIntent.handled && actionIntent.reply) &&
+      !(calendar.handled && calendar.reply)
+        ? await handleGmailReadOne(userId, message.content.text)
         : { handled: false as const };
 
     // Gmail questions ("do I have any important emails", "what are my latest
@@ -304,9 +403,13 @@ async function processInbound(message: InboundMessage): Promise<void> {
       !(memory.handled && memory.reply) &&
       !(reminder.handled && reminder.reply) &&
       !(confirmation.handled && confirmation.reply) &&
+      !(gmailClarify.handled && gmailClarify.reply) &&
+      !(gmailDraftFollowup.handled && gmailDraftFollowup.reply) &&
       !(calendarWrite.handled && calendarWrite.reply) &&
+      !(gmailWrite.handled && gmailWrite.reply) &&
       !(actionIntent.handled && actionIntent.reply) &&
-      !(calendar.handled && calendar.reply)
+      !(calendar.handled && calendar.reply) &&
+      !(gmailReadOne.handled && gmailReadOne.reply)
         ? await handleGmailQuestion(userId, message.content.text)
         : { handled: false as const };
 
@@ -328,11 +431,28 @@ async function processInbound(message: InboundMessage): Promise<void> {
         sender: maskHandle(to),
         outcome: confirmation.outcome,
       });
+    } else if (gmailClarify.handled && gmailClarify.reply) {
+      replyText = gmailClarify.reply;
+      logger.info("sendblue.webhook gmail clarification", {
+        sender: maskHandle(to),
+        action: gmailClarify.action,
+      });
+    } else if (gmailDraftFollowup.handled && gmailDraftFollowup.reply) {
+      replyText = gmailDraftFollowup.reply;
+      logger.info("sendblue.webhook gmail draft follow-up", {
+        sender: maskHandle(to),
+      });
     } else if (calendarWrite.handled && calendarWrite.reply) {
       replyText = calendarWrite.reply;
       logger.info("sendblue.webhook calendar write", {
         sender: maskHandle(to),
         action: calendarWrite.action,
+      });
+    } else if (gmailWrite.handled && gmailWrite.reply) {
+      replyText = gmailWrite.reply;
+      logger.info("sendblue.webhook gmail write", {
+        sender: maskHandle(to),
+        action: gmailWrite.action,
       });
     } else if (actionIntent.handled && actionIntent.reply) {
       replyText = actionIntent.reply;
@@ -346,6 +466,12 @@ async function processInbound(message: InboundMessage): Promise<void> {
         sender: maskHandle(to),
         intent: calendar.intent,
       });
+    } else if (gmailReadOne.handled && gmailReadOne.reply) {
+      replyText = gmailReadOne.reply;
+      logger.info("sendblue.webhook gmail read-one", {
+        sender: maskHandle(to),
+        mode: gmailReadOne.mode,
+      });
     } else if (gmail.handled && gmail.reply) {
       replyText = gmail.reply;
       logger.info("sendblue.webhook gmail question", {
@@ -353,13 +479,27 @@ async function processInbound(message: InboundMessage): Promise<void> {
         intent: gmail.intent,
       });
     } else {
-      const brain = await generateBrainReply(message, conversationId, userId);
-      replyText = brain.reply;
-      logger.info("sendblue.webhook brain reply", {
-        sender: maskHandle(to),
-        usedFallback: brain.usedFallback,
-        historyCount: brain.historyCount,
-      });
+      // Safety net (Fix 1): while a confirmable action awaits yes/no, an
+      // unrecognised reply must NEVER reach the generic brain — which could
+      // hallucinate an operational success ("sent!"). Re-prompt deterministically
+      // and keep the action safely pending. No active proposal → normal brain.
+      const guard = userId
+        ? await handlePendingProposalReprompt(userId)
+        : { handled: false as const };
+      if (guard.handled && guard.reply) {
+        replyText = guard.reply;
+        logger.info("sendblue.webhook pending-proposal reprompt", {
+          sender: maskHandle(to),
+        });
+      } else {
+        const brain = await generateBrainReply(message, conversationId, userId);
+        replyText = brain.reply;
+        logger.info("sendblue.webhook brain reply", {
+          sender: maskHandle(to),
+          usedFallback: brain.usedFallback,
+          historyCount: brain.historyCount,
+        });
+      }
     }
   }
 

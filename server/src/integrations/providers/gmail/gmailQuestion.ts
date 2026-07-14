@@ -152,11 +152,55 @@ export function countUnread(messages: readonly NormalizedGmailMessage[]): number
   return messages.reduce((n, m) => n + (m.unread ? 1 : 0), 0);
 }
 
-/** PURE: an iMessage-friendly numbered list of sender — subject lines. */
-function numberedList(messages: readonly NormalizedGmailMessage[], limit: number): string {
+/** Max characters of a Gmail snippet shown in a list line. */
+const LIST_SNIPPET_MAX = 80;
+
+/**
+ * PURE: collapse an immediately-repeated identical reply prefix for DISPLAY only
+ * ("Re: Re: X" → "Re: X"). Kept local to the read layer so it never depends on the
+ * write module; it only affects what the user reads, never any thread metadata.
+ */
+function cleanListSubject(msg: NormalizedGmailMessage): string {
+  let s = (msg.subject ?? "").trim();
+  if (!s) return "(no subject)";
+  let prev: string;
+  do {
+    prev = s;
+    s = s.replace(/^(re|fwd|fw)\s*:\s*(?=\1\s*:)/i, "");
+  } while (s !== prev);
+  return s;
+}
+
+/** PURE: a single-line, truncated snippet safe for iMessage (never a full body). */
+function listSnippet(snippet: string | null | undefined): string {
+  const s = (snippet ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  return s.length <= LIST_SNIPPET_MAX ? s : `${s.slice(0, LIST_SNIPPET_MAX).trimEnd()}…`;
+}
+
+/**
+ * PURE: an iMessage-friendly numbered list. Each entry shows the sender and cleaned
+ * subject, then (when known) the received time and a short truncated snippet on
+ * their own indented lines. Concise, newest-first, and never a full body.
+ */
+function numberedList(
+  messages: readonly NormalizedGmailMessage[],
+  limit: number,
+  tz: string | undefined,
+  now: Date,
+): string {
   return messages
     .slice(0, limit)
-    .map((m, i) => `${i + 1}. ${senderLabel(m)} — ${subjectLabel(m)}`)
+    .map((m, i) => {
+      const lines = [`${i + 1}. ${senderLabel(m)} — ${cleanListSubject(m)}`];
+      const received = formatReceived(m, tz, now);
+      const unread = m.unread ? " Unread." : "";
+      const meta = `${received}${unread}`.trim();
+      if (meta) lines.push(`   ${meta}`);
+      const snippet = listSnippet(m.snippet);
+      if (snippet) lines.push(`   “${snippet}”`);
+      return lines.join("\n");
+    })
     .join("\n");
 }
 
@@ -180,26 +224,30 @@ export function formatImportantAnswer(
   return `You have ${count} recent ${noun} that look important:\n${lines.join("\n")}`;
 }
 
-/** PURE: format the "latest emails" answer. */
+/** PURE: format the "latest emails" answer (with received time + snippet). */
 export function formatLatestAnswer(
   messages: readonly NormalizedGmailMessage[],
+  tz?: string,
+  now: Date = new Date(),
   limit = 5,
 ): string {
   if (messages.length === 0) {
     return "I couldn’t find any recent emails in your inbox.";
   }
-  return `Here are your latest emails:\n${numberedList(messages, limit)}`;
+  return `Here are your latest emails:\n${numberedList(messages, limit, tz, now)}`;
 }
 
-/** PURE: format the "today" answer. */
+/** PURE: format the "today" answer (with received time + snippet). */
 export function formatTodayAnswer(
   todays: readonly NormalizedGmailMessage[],
+  tz?: string,
+  now: Date = new Date(),
   limit = 8,
 ): string {
   if (todays.length === 0) {
     return "You haven’t received any emails today.";
   }
-  return `Here’s what you’ve received today:\n${numberedList(todays, limit)}`;
+  return `Here’s what you’ve received today:\n${numberedList(todays, limit, tz, now)}`;
 }
 
 /** PURE: format the "unread count" answer. */
@@ -234,12 +282,12 @@ export function buildGmailReply(
       return formatImportantAnswer(important, tz, now);
     }
     case "today":
-      return formatTodayAnswer(filterToday(messages, tz, now));
+      return formatTodayAnswer(filterToday(messages, tz, now), tz, now);
     case "unread":
       return formatUnreadAnswer(countUnread(messages));
     case "latest":
     default:
-      return formatLatestAnswer(messages);
+      return formatLatestAnswer(messages, tz, now);
   }
 }
 

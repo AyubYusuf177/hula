@@ -135,13 +135,18 @@ export async function createActionProposal(
  * Return the user's single ACTIVE proposal — the most recent `proposed` row that
  * has not expired — or null. Expired-but-still-`proposed` rows are lazily flipped
  * to `expired` here so a stale "yes" can never confirm them.
+ *
+ * Only `confirmationRequired` proposals are considered: this is the row a natural
+ * "yes"/"no" resolves. Non-confirmation pending rows (e.g. a Gmail reply-target
+ * clarification, see `gmailClarification`) are deliberately invisible here so they
+ * can never be grabbed — or accidentally executed — by the confirmation flow.
  */
 export async function getActiveProposal(
   userId: string,
 ): Promise<ActionProposalView | null> {
   const prisma = getPrisma();
   const row = await prisma.actionProposal.findFirst({
-    where: { userId, status: "proposed" },
+    where: { userId, status: "proposed", confirmationRequired: true },
     orderBy: { createdAt: "desc" },
     select: PROPOSAL_SELECT,
   });
@@ -155,6 +160,88 @@ export async function getActiveProposal(
     return null;
   }
   return toView(row as ProposalRow);
+}
+
+/**
+ * Return the most recent `proposed` proposal for a user with a specific
+ * `actionId`, or null — WITHOUT auto-expiring it (the caller inspects `expiresAt`
+ * and decides). Used by the Gmail clarification flow to find its own pending
+ * pseudo-proposal without disturbing the confirmation store.
+ */
+export async function getLatestProposalByAction(
+  userId: string,
+  actionId: string,
+): Promise<ActionProposalView | null> {
+  const row = await getPrisma().actionProposal.findFirst({
+    where: { userId, actionId, status: "proposed" },
+    orderBy: { createdAt: "desc" },
+    select: PROPOSAL_SELECT,
+  });
+  return row ? toView(row as ProposalRow) : null;
+}
+
+/**
+ * Return recent proposals for a user with a specific `actionId` REGARDLESS of
+ * status, newest first, WITHOUT auto-expiring them (the caller inspects status +
+ * `expiresAt` and decides). Used by the Gmail last-draft follow-up to find the
+ * recent Hula-created drafts still eligible to send, and to distinguish an
+ * already-sent draft from one that never existed.
+ */
+export async function listRecentProposalsByAction(
+  userId: string,
+  actionId: string,
+  limit = 10,
+): Promise<ActionProposalView[]> {
+  const rows = await getPrisma().actionProposal.findMany({
+    where: { userId, actionId },
+    orderBy: { createdAt: "desc" },
+    take: Math.min(Math.max(1, limit), 50),
+    select: PROPOSAL_SELECT,
+  });
+  return rows.map((r) => toView(r as ProposalRow));
+}
+
+/**
+ * Release a `confirmed` proposal back to `proposed` (only if currently
+ * `confirmed` and owned by the user), clearing `confirmedAt`. Used to safely undo
+ * an atomic claim when the subsequent provider action failed, so the user can
+ * retry WITHOUT any risk of a duplicate send.
+ */
+export async function revertProposalToProposed(
+  userId: string,
+  proposalId: string,
+): Promise<void> {
+  await getPrisma().actionProposal.updateMany({
+    where: { id: proposalId, userId, status: "confirmed" },
+    data: { status: "proposed", confirmedAt: null },
+  });
+}
+
+/**
+ * Replace the redacted `inputJson` of a still-`proposed` proposal owned by the
+ * user (a no-op if it was already resolved). Used to record a Gmail
+ * clarification's last-selected option so a repeat/correction is handled safely.
+ */
+export async function updateProposalInput(
+  userId: string,
+  proposalId: string,
+  input: Record<string, unknown>,
+): Promise<void> {
+  await getPrisma().actionProposal.updateMany({
+    where: { id: proposalId, userId, status: "proposed" },
+    data: { inputJson: input as Prisma.InputJsonValue },
+  });
+}
+
+/** Mark a still-`proposed` proposal `expired` (only if currently `proposed`). */
+export async function expireProposal(
+  userId: string,
+  proposalId: string,
+): Promise<void> {
+  await getPrisma().actionProposal.updateMany({
+    where: { id: proposalId, userId, status: "proposed" },
+    data: { status: "expired" },
+  });
 }
 
 /** Get one proposal owned by the user, or null. Never returns others' rows. */

@@ -112,17 +112,20 @@ async function main(): Promise<void> {
 
   // --- Provider registry ---------------------------------------------------
 
-  check("catalog: gmail exists, is separate from calendar, read-only", () => {
+  check("catalog: gmail exists, is separate from calendar, read + compose", () => {
     const gmail = getProvider(GMAIL_PROVIDER);
     assert.ok(gmail, "gmail must be in the catalog");
     assert.equal(gmail?.provider, "gmail");
     assert.notEqual(GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER);
     assert.equal(gmail?.status, "available_readonly");
-    assert.deepEqual(gmail?.capabilities, ["email.read"]);
-    // Must NOT advertise send/draft.
-    assert.ok(!gmail?.capabilities.includes("email.send"));
-    assert.ok(!gmail?.capabilities.includes("email.draft"));
-    assert.deepEqual(gmail?.defaultScopes, [GMAIL_READONLY_SCOPE]);
+    // Section 16: read + draft/send capabilities.
+    assert.ok(gmail?.capabilities.includes("email.read"));
+    assert.ok(gmail?.capabilities.includes("email.draft"));
+    assert.ok(gmail?.capabilities.includes("email.send"));
+    // Requests read-only + the least-privilege compose scope (no modify/full mailbox).
+    assert.ok(gmail?.defaultScopes.includes(GMAIL_READONLY_SCOPE));
+    assert.ok(gmail?.defaultScopes.includes("https://www.googleapis.com/auth/gmail.compose"));
+    assert.ok(!gmail?.defaultScopes.some((s) => /gmail\.modify|mail\.google\.com/.test(s)));
   });
 
   // --- OAuth config --------------------------------------------------------
@@ -150,7 +153,10 @@ async function main(): Promise<void> {
       assert.equal(config.redirectUri, TEST_CONFIG.redirectUri);
       const def = getProvider(GMAIL_PROVIDER)?.defaultScopes ?? [];
       assert.deepEqual(config.scopes, def);
-      assert.ok(config.scopes.every((s) => /gmail\.readonly/.test(s)), "scopes read-only");
+      // Section 16: defaults include read-only + compose; never a broader scope.
+      assert.ok(config.scopes.some((s) => /gmail\.readonly/.test(s)), "includes read-only");
+      assert.ok(config.scopes.some((s) => /gmail\.compose/.test(s)), "includes compose");
+      assert.ok(!config.scopes.some((s) => /gmail\.modify|mail\.google\.com/.test(s)), "no broad scope");
     } finally {
       env.GOOGLE_OAUTH_CLIENT_ID = saved.id;
       env.GOOGLE_OAUTH_CLIENT_SECRET = saved.secret;

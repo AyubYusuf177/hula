@@ -20,6 +20,50 @@ export const GMAIL_READONLY_SCOPE =
   "https://www.googleapis.com/auth/gmail.readonly" as const;
 
 /**
+ * The WRITE scope added in Section 16. `gmail.compose` grants exactly what Hula
+ * needs — creating drafts and sending messages/replies — WITHOUT the broad
+ * `gmail.modify` or full-mailbox powers (no delete/label/archive from the product
+ * flow). Requested ALONGSIDE `gmail.readonly` so reads keep working. A connection
+ * made before this section holds only `gmail.readonly` and must be reconnected
+ * before any draft/send action can run.
+ */
+export const GMAIL_COMPOSE_SCOPE =
+  "https://www.googleapis.com/auth/gmail.compose" as const;
+
+/**
+ * The small, transient reply context Hula reads from ONE matched message to build
+ * a correct reply (Section 16). It is used immediately and never persisted. Only
+ * the threading headers needed for a valid reply are kept — never the body.
+ */
+export interface GmailReplyContext {
+  /** The Gmail thread the reply must stay in. */
+  threadId: string;
+  /** The matched message's RFC-2822 `Message-ID` (for In-Reply-To/References). */
+  messageIdHeader: string | null;
+  /** The matched message's existing `References` header, when present. */
+  references: string | null;
+  /** Where a reply should go: `Reply-To` when set, else the original `From`. */
+  replyToAddress: string | null;
+  /** Display name of the reply recipient, when the header supplied one. */
+  replyToName: string | null;
+  /** The original subject (used to build a de-duplicated `Re:` subject). */
+  subject: string | null;
+}
+
+/** The raw shape (subset) of a Gmail `drafts.create` response we read. */
+export interface RawGmailDraftResponse {
+  id?: string;
+  message?: { id?: string; threadId?: string };
+}
+
+/** The raw shape (subset) of a Gmail `messages.send` response we read. */
+export interface RawGmailSendResponse {
+  id?: string;
+  threadId?: string;
+  labelIds?: string[];
+}
+
+/**
  * A normalized, app-safe Gmail message. Deliberately omits the body, raw MIME,
  * payload parts, attachment data, and the full header collection. Only the safe
  * metadata below plus Gmail's own short `snippet` survive normalization.

@@ -191,49 +191,58 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
       { name: "query", type: "string", required: true, description: "Search query." },
     ],
     examples: ["find the email from my landlord", "search my inbox for the invoice"],
-    userFacingDescription: "I can't read your email yet — no email account is connected.",
+    userFacingDescription:
+      "I can’t search your inbox that way yet — but I can pull up your recent, unread, or important emails if that helps.",
   },
   {
     actionId: "email.createDraft",
     category: "email",
     displayName: "Create email draft",
-    description: "Create a draft email (not sent).",
+    description:
+      "Create a real Gmail draft (never sent). Section 16 — executes immediately once " +
+      "the recipient/thread is safely resolved; no confirmation required.",
     providerTypes: ["gmail"],
     requiredCapabilities: ["email.draft"],
     requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
     riskLevel: "draft",
-    confirmationRequired: true,
-    implemented: false,
+    // A draft never leaves Hula's control (it stays in the user's Drafts), so it
+    // does NOT require explicit confirmation — matching the risk ladder.
+    confirmationRequired: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
-      { name: "to", type: "string", required: true, description: "Recipient." },
+      { name: "to", type: "string", required: true, description: "Recipient address." },
       { name: "subject", type: "string", required: false, description: "Subject line." },
       { name: "body", type: "string", required: true, description: "Email body." },
     ],
-    examples: ["draft an email to Rob", "write an email to my accountant"],
+    examples: ["draft an email to Rob", "draft a reply to my accountant's email"],
     userFacingDescription:
-      "I can't draft emails in your account yet — no email account is connected. I can write the text here for you to send.",
+      "I couldn’t set up that draft just now — mind trying again in a moment?",
   },
   {
     actionId: "email.sendDraft",
     category: "email",
     displayName: "Send email",
-    description: "Send an email on the user's behalf.",
+    description:
+      "Send a new email or a reply on the user's behalf (Section 16). Requires an " +
+      "explicit confirmation via the Section 12 proposal runtime before it ever sends.",
     providerTypes: ["gmail"],
     requiredCapabilities: ["email.send"],
-    requiredScopes: ["https://www.googleapis.com/auth/gmail.send"],
+    // `gmail.compose` grants both draft creation AND sending, so it is the single
+    // scope Section 16 requests — no separate gmail.send.
+    requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
     riskLevel: "send",
     confirmationRequired: true,
-    implemented: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
-      { name: "to", type: "string", required: true, description: "Recipient." },
+      { name: "to", type: "string", required: true, description: "Recipient address." },
       { name: "subject", type: "string", required: false, description: "Subject line." },
       { name: "body", type: "string", required: true, description: "Email body." },
     ],
     examples: ["send an email to Rob", "email my accountant the figures"],
     userFacingDescription:
-      "I can't send emails yet — no email account is connected. I can write the text here for you to send.",
+      "I couldn’t set that email up just now — mind trying again in a moment?",
   },
   // --- Tasks -------------------------------------------------------------
   {

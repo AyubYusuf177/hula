@@ -259,3 +259,25 @@ export async function loadBrainContextForUser(userId: string): Promise<HulaPromp
   if (!saved) return {};
   return profileToBrainContext(toProfileView(saved));
 }
+
+/**
+ * Read the authenticated user's real display name for signing generated email
+ * (Section 16 / Fix 3), by internal Hula user id. Prefers the full `displayName`
+ * and falls back to `firstName`; returns null when neither is stored so a
+ * signature is NEVER invented. Best-effort — never throws.
+ */
+export async function getUserDisplayName(userId: string): Promise<string | null> {
+  try {
+    const saved = await getPrisma().userProfile.findUnique({
+      where: { userId },
+      select: { displayName: true, firstName: true },
+    });
+    const displayName = saved?.displayName?.trim();
+    if (displayName) return displayName;
+    const firstName = saved?.firstName?.trim();
+    if (firstName) return firstName;
+    return null;
+  } catch {
+    return null;
+  }
+}

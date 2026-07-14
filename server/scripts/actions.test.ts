@@ -102,21 +102,33 @@ check("registry: every action has complete, typed metadata", () => {
   }
 });
 
-check("registry: only the two calendar reads are implemented today", () => {
+check("registry: implemented actions are the calendar reads + Gmail draft/send", () => {
   const implemented = ACTION_DEFINITIONS.filter((a) => a.implemented).map((a) => a.actionId);
-  assert.deepEqual(implemented.sort(), ["calendar.findNextEvent", "calendar.listEvents"]);
-  // No implemented action writes/sends/buys.
+  // Section 16 adds real Gmail draft creation + send to the Section 11 calendar reads.
+  assert.deepEqual(implemented.sort(), [
+    "calendar.findNextEvent",
+    "calendar.listEvents",
+    "email.createDraft",
+    "email.sendDraft",
+  ]);
+  // No implemented action is a purchase/destructive risk.
   for (const a of ACTION_DEFINITIONS) {
-    if (a.implemented) assert.equal(a.riskLevel, "read", `${a.actionId} must be read-only`);
+    if (a.implemented) {
+      assert.ok(
+        ["read", "draft", "send"].includes(a.riskLevel),
+        `${a.actionId} unexpected implemented risk: ${a.riskLevel}`,
+      );
+    }
   }
 });
 
 check("registry: risk levels and confirmation rules are coherent", () => {
   for (const a of ACTION_DEFINITIONS) {
-    if (a.riskLevel === "read") {
-      assert.equal(a.confirmationRequired, false, `${a.actionId} read needs no confirmation`);
+    if (a.riskLevel === "read" || a.riskLevel === "draft") {
+      // Reads and drafts never leave Hula's control -> no confirmation.
+      assert.equal(a.confirmationRequired, false, `${a.actionId} ${a.riskLevel} needs no confirmation`);
     } else {
-      // Any non-read (draft/write/send/purchase/destructive) requires confirmation.
+      // write/send/purchase/destructive require confirmation.
       assert.equal(a.confirmationRequired, true, `${a.actionId} must require confirmation`);
     }
   }

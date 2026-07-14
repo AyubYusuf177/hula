@@ -18,8 +18,12 @@ import { GMAIL_PROVIDER } from "./types";
  * insufficient scope, or a rate limit. A single valid authentication failure
  * triggers exactly one refresh + retry — never an infinite loop.
  *
- * This client only ever issues GETs — there is no mutation path (no send, draft,
- * modify, trash, or label change) anywhere in it.
+ * Section 16 adds a NARROW write path (`gmailRequest` / `gmailRequestForConnection`)
+ * used ONLY by the draft/send provider layer for the approved actions — creating
+ * drafts and sending messages/replies via `gmail.compose`. It mirrors the GET
+ * path's safety exactly (absolute-URL building, token-shape guard, per-attempt
+ * timeout, precise error mapping, one refresh + retry) and never logs a body or
+ * token. There is still NO trash/label/modify path anywhere in this client.
  */
 
 /** Refresh a little before the token actually expires to avoid edge failures. */
@@ -534,4 +538,134 @@ export async function gmailGetForConnection<T>(
 /** Whether a reason means the user must reconnect (grant no longer usable). */
 export function isReconnectReason(reason: GmailErrorReason): boolean {
   return RECONNECT_REASONS.has(reason);
+}
+
+// --- Write-capable requests (Section 16) ---------------------------------
+
+/** HTTP methods a Gmail WRITE may use. GET stays on `gmailGet`. */
+export type GmailWriteMethod = "POST" | "DELETE";
+
+/**
+ * Authenticated write (POST/DELETE) against the Gmail API.
+ *
+ * Mirrors `gmailGet`'s SAFETY exactly — the same absolute-URL building, token
+ * shape guard, per-attempt abort timeout, precise fetch-exception mapping, and
+ * classified HTTP-error mapping (the raw provider body is NEVER thrown). Unlike
+ * GET, a write MAY carry a JSON body, so the undici "GET must not have a body"
+ * guard does not apply. An empty success body (e.g. 204 from a draft delete)
+ * returns `{}` as `T`. `fetchImpl` is injectable for tests.
+ */
+export async function gmailRequest<T>(
+  accessToken: string,
+  method: GmailWriteMethod,
+  path: string,
+  options: { query?: GmailQuery; body?: unknown } = {},
+  fetchImpl?: FetchLike,
+  connectionId?: string,
+): Promise<T> {
+  const doFetch = fetchImpl ?? (fetch as unknown as FetchLike);
+
+  const url = buildGmailUrl(path, options.query ?? {});
+
+  if (
+    typeof accessToken !== "string" ||
+    accessToken.length === 0 ||
+    // eslint-disable-next-line no-control-regex
+    /[^\x20-\x7e]/.test(accessToken)
+  ) {
+    throw new GmailError(
+      "invalid_request_headers",
+      "Gmail access token is not a valid Authorization header value",
+    );
+  }
+
+  const headers: Record<string, string> = { authorization: `Bearer ${accessToken}` };
+  const hasBody = options.body !== undefined && method !== "DELETE";
+  const body = hasBody ? JSON.stringify(options.body) : undefined;
+  if (hasBody) headers["content-type"] = "application/json";
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+
+  let res: { ok: boolean; status: number; text: () => Promise<string> };
+  try {
+    res = await doFetch(url.toString(), {
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const reason = classifyFetchException(err);
+    logFetchException({
+      operation: `${method} ${url.pathname}`,
+      err,
+      requestHost: url.host,
+      requestPath: url.pathname,
+      mappedErrorCode: reason,
+      connectionId,
+    });
+    const cause = safeFetchCause(err);
+    throw new GmailError(
+      reason,
+      "Network request to Gmail failed before an HTTP response",
+      null,
+      { name: cause.name, code: cause.code },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    let errBody = "";
+    try {
+      errBody = (await res.text()).slice(0, 500);
+    } catch {
+      errBody = "";
+    }
+    const reason = classifyGmailHttpError(res.status, errBody);
+    throw new GmailError(reason, `Gmail request failed (${res.status})`, res.status);
+  }
+
+  let text = "";
+  try {
+    text = await res.text();
+  } catch {
+    text = "";
+  }
+  if (text.trim().length === 0) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new GmailError(
+      "malformed_provider_response",
+      "Gmail returned an unparseable response",
+    );
+  }
+}
+
+/**
+ * Connection-aware Gmail WRITE with exactly ONE refresh + retry on a single valid
+ * authentication failure (HTTP 401) — the same policy the read path uses. If the
+ * retry still 401s, the connection is marked `expired` and an `invalid_grant`
+ * error is thrown. Reuses the existing token store/refresh untouched.
+ */
+export async function gmailRequestForConnection<T>(
+  connectionId: string,
+  method: GmailWriteMethod,
+  path: string,
+  options: { query?: GmailQuery; body?: unknown } = {},
+  fetchImpl?: FetchLike,
+): Promise<T> {
+  try {
+    return await requestWithAuthRetry<T>({
+      getAccessToken: () => getValidGmailAccessToken(connectionId, fetchImpl),
+      refresh: () => forceRefreshGmailAccessToken(connectionId, fetchImpl),
+      doGet: (token) => gmailRequest<T>(token, method, path, options, fetchImpl, connectionId),
+      onInvalidGrant: () => markConnection(connectionId, "expired"),
+    });
+  } catch (err) {
+    logProviderError(`${method} ${path}`, err, connectionId);
+    throw err;
+  }
 }

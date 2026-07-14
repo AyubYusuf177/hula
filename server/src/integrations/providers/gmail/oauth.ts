@@ -11,23 +11,27 @@ import {
   type GoogleTokenResponse,
   type PkcePair,
 } from "../googleCalendar/oauth";
-import { GMAIL_PROVIDER, GMAIL_READONLY_SCOPE } from "./types";
+import { GMAIL_COMPOSE_SCOPE, GMAIL_PROVIDER, GMAIL_READONLY_SCOPE } from "./types";
 
 /**
- * Gmail OAuth helpers (Section 14) — READ-ONLY.
+ * Gmail OAuth helpers (Section 14 + Section 16).
  *
  * Gmail authorizes through the SAME Google OAuth 2.0 Authorization Code + PKCE
  * primitives as Google Calendar, but as a SEPARATE provider: its own redirect
- * URI (`GMAIL_OAUTH_REDIRECT_URI`), its own least-privilege scope
- * (`gmail.readonly`), its own connect + callback routes, and its own connection
- * record. It reuses ONLY the genuinely provider-agnostic, config-driven pieces
- * (`generatePkce`, `buildAuthorizationUrl`, `exchangeCodeForTokens`,
- * `refreshAccessToken`) — it never reads Calendar env or touches Calendar state.
+ * URI (`GMAIL_OAUTH_REDIRECT_URI`), its own least-privilege scopes, its own
+ * connect + callback routes, and its own connection record. It reuses ONLY the
+ * genuinely provider-agnostic, config-driven pieces (`generatePkce`,
+ * `buildAuthorizationUrl`, `exchangeCodeForTokens`, `refreshAccessToken`) — it
+ * never reads Calendar env or touches Calendar state.
+ *
+ * Scopes (Section 16): `gmail.readonly` (read) PLUS `gmail.compose` (create
+ * drafts + send messages/replies). `gmail.compose` is least-privilege for writes
+ * — it does NOT grant delete/label/archive/modify or full-mailbox access. Scopes
+ * come from `GMAIL_SCOPES` when set, else the catalog's defaults.
  *
  * Hard rules:
- *   - Only the READ-ONLY `gmail.readonly` scope is ever requested. There is NO
- *     path here that can request gmail.modify / gmail.send / gmail.compose or
- *     the full-mailbox scope.
+ *   - No scope beyond `gmail.readonly` + `gmail.compose` is ever requested (never
+ *     gmail.modify or the full-mailbox scope).
  *   - Client secret and tokens are NEVER logged or put into a thrown message.
  *   - Missing config surfaces as `GoogleOAuthConfigError`, never a crash.
  */
@@ -98,4 +102,13 @@ export function getGmailOAuthConfig(): GoogleOAuthConfig {
  */
 export function hasGmailReadonlyScope(grantedScopes: readonly string[]): boolean {
   return grantedScopes.some((s) => s.trim() === GMAIL_READONLY_SCOPE);
+}
+
+/**
+ * PURE: verify the Gmail COMPOSE (write) scope was granted, by MEMBERSHIP. This
+ * is the scope Section 16's draft/send actions require; a connection lacking it
+ * (e.g. a pre-Section-16 read-only grant) must be reconnected before writing.
+ */
+export function hasGmailComposeScope(grantedScopes: readonly string[]): boolean {
+  return grantedScopes.some((s) => s.trim() === GMAIL_COMPOSE_SCOPE);
 }

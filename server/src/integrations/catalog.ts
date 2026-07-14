@@ -88,13 +88,18 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     category: "email",
     status: "available_readonly",
     authType: "oauth2",
-    // Least-privilege READ-ONLY. `gmail.readonly` covers listing inbox message IDs
-    // and reading message METADATA + snippets. NO write scope is requested — Hula
-    // cannot send, draft, reply, delete, archive, or modify labels.
-    defaultScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
-    capabilities: ["email.read"],
+    // Section 16: request the READ-ONLY scope (list/read metadata) PLUS the
+    // least-privilege WRITE scope `gmail.compose` (create drafts + send
+    // messages/replies). `gmail.compose` deliberately does NOT grant delete,
+    // label, archive, or full-mailbox powers. A connection made before this
+    // change holds only `gmail.readonly` and must be reconnected to draft/send.
+    defaultScopes: [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ],
+    capabilities: ["email.read", "email.draft", "email.send"],
     notes:
-      "Live read-only integration (Section 14). Read-only OAuth (Authorization Code + PKCE). No email send/draft/modify.",
+      "Live integration. Read (Section 14) + draft/send email and replies (Section 16) via OAuth (Authorization Code + PKCE). Drafting/sending requires the gmail.compose scope; every actual send needs explicit confirmation.",
   },
   {
     provider: "zoom",
