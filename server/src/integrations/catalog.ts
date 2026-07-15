@@ -16,6 +16,7 @@
 export type ProviderId =
   | "google_calendar"
   | "gmail"
+  | "todoist"
   | "zoom"
   | "notion"
   | "asana"
@@ -107,6 +108,39 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     capabilities: ["email.read", "email.draft", "email.send", "email.modify"],
     notes:
       "Live integration. Read (Section 14) + draft/send (Section 16) + search, draft lifecycle, and message management (Section 17) via OAuth (Authorization Code + PKCE). Drafting/sending requires gmail.compose; marking/starring/archiving/trashing requires gmail.modify. Every send, draft deletion, and trash needs explicit confirmation.",
+  },
+  {
+    provider: "todoist",
+    displayName: "Todoist",
+    category: "productivity",
+    status: "available_readonly",
+    authType: "oauth2",
+    // Section 19. Todoist scopes are COARSE and COMMA-separated (unlike Google's
+    // space-separated, per-method scopes) — the exact names come from the current
+    // official v1 documentation:
+    //
+    //   data:read       read-only access to application data
+    //   data:read_write read AND write (implies data:read; backs the whole normal
+    //                   task lifecycle: create/update/reschedule/complete/reopen)
+    //   data:delete     delete application data (task deletion ONLY)
+    //   project:delete  delete PROJECTS — deliberately NOT requested. Hula never
+    //                   deletes a project, so asking for it would be strictly
+    //                   more access than the product needs.
+    //
+    // `data:read` is NOT requested alongside `data:read_write` because the latter
+    // already implies it; listing both would only widen the consent screen text.
+    //
+    // `data:delete` is requested but treated as OPTIONAL at runtime: a user who
+    // grants read_write and declines delete keeps a fully working integration and
+    // only task deletion refuses. See `capabilitiesFromScopes` in ./oauth.
+    defaultScopes: ["data:read_write", "data:delete"],
+    capabilities: ["tasks.read", "tasks.write", "tasks.delete"],
+    notes:
+      "Live integration. Read (today/overdue/upcoming/project/label/priority/completed) plus the " +
+      "full task lifecycle — create, update, reschedule, move, relabel, complete, reopen, delete — " +
+      "via OAuth against the official API v1. Deletion and any bulk action require explicit " +
+      "confirmation; single reversible task actions do not. Deletion needs data:delete, which is " +
+      "optional: without it every other capability still works.",
   },
   {
     provider: "zoom",

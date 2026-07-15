@@ -1,4 +1,5 @@
 import { logger } from "../utils/logger";
+import { CONFIRM_INSTRUCTION } from "./confirmationCopy";
 import { executeAction } from "./executor";
 import {
   confirmProposal,
@@ -34,6 +35,15 @@ function normalize(text: string): string {
 const CONFIRM_RE =
   /^(?:y|yh|yes|yep|yeah|yea|yup|ya|sure|ok|okay|k|confirm(?:ed)?|do it|send|send it|send that|go ahead|go for it|proceed|please do|sounds good|looks good|that works|perfect|correct|absolutely|sgtm)(?:\s+(?:please|do it|go ahead|thanks|thank you))?$/;
 
+/**
+ * "cancel" and "stop" REMAIN cancellations even though Hula no longer asks for
+ * them (they are carrier opt-out keywords — see `CONFIRM_INSTRUCTION`).
+ *
+ * Keeping them is the safe direction. A user who types "Cancel" unambiguously
+ * means stop; the carrier will swallow Hula's reply, but abandoning the pending
+ * write is still exactly right — far better than leaving it armed because the word
+ * was also meaningful to the network. `no` is the word Hula actually advertises.
+ */
 const CANCEL_RE =
   /^(?:no|nope|nah|cancel(?: that| it)?|don'?t(?: send| do it)?|do not(?: send)?|stop|reject|never ?mind|forget it|leave it|no thanks|no thank you)$/;
 
@@ -133,9 +143,13 @@ export async function handleActionConfirmation(
   }
 }
 
-/** The deterministic re-prompt shown when a confirmable action is awaiting go-ahead. */
-export const PENDING_PROPOSAL_REPROMPT =
-  "I’m waiting for your go-ahead. Reply ‘send it’ to continue or ‘cancel’ to stop.";
+/**
+ * The deterministic re-prompt shown when a confirmable action is awaiting go-ahead.
+ *
+ * It no longer instructs "cancel": Sendblue treats that word as a carrier opt-out
+ * and blocks Hula's replies. See `CONFIRM_INSTRUCTION`.
+ */
+export const PENDING_PROPOSAL_REPROMPT = `I’m waiting for your go-ahead. ${CONFIRM_INSTRUCTION}`;
 
 /** Result of the active-proposal safety net. */
 export interface PendingProposalGuardResult {

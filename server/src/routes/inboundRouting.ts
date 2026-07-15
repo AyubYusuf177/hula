@@ -20,6 +20,13 @@ import { handleGmailQuestion } from "../integrations/providers/gmail/gmailQuesti
 import { handleGmailReadOne } from "../integrations/providers/gmail/gmailReadOne";
 import { handleGmailSearch } from "../integrations/providers/gmail/gmailSearchQuestion";
 import { handleGmailSummary } from "../integrations/providers/gmail/gmailSummary";
+import {
+  handleTodoistUndo,
+  handleTodoistWrite,
+} from "../integrations/providers/todoist/todoistActions";
+import { handleTodoistRead } from "../integrations/providers/todoist/todoistReads";
+import { handleTransportKeyword } from "../channels/transportKeywords";
+import { handleEntityFollowup } from "./entityFollowup";
 import { handleMemoryCommand } from "../users/memory";
 import { handleReminderCommand } from "../reminders/reminders";
 
@@ -52,9 +59,11 @@ type Handler = (userId: string, text: string | undefined) => Promise<HandlerResu
 
 /** Every handler is injectable so routing can be tested with zero real providers. */
 export interface InboundRouterDeps {
+  transportKeyword?: Handler;
   memory?: Handler;
   reminder?: Handler;
   confirmation?: Handler;
+  entityFollowup?: Handler;
   gmailClarify?: Handler;
   gmailDraftFollowup?: Handler;
   gmailDraftLifecycle?: Handler;
@@ -70,6 +79,9 @@ export interface InboundRouterDeps {
   gmailSummary?: Handler;
   gmailSearch?: Handler;
   gmailQuestion?: Handler;
+  todoistUndo?: Handler;
+  todoistWrite?: Handler;
+  todoistRead?: Handler;
   pendingReprompt?: (userId: string) => Promise<HandlerResult>;
 }
 
@@ -84,10 +96,28 @@ export interface RoutedReply {
  * The ordered cascade. Earlier entries win.
  *
  * The ordering rules that are load-bearing (do not reorder without reading these):
- *  - `memory` and `reminder` keep absolute priority — they are the user's own stored
- *    data and must never be reinterpreted as an email or calendar request.
+ *  - `transportKeyword` is ABSOLUTELY FIRST. A carrier keyword like START/UNSTOP is
+ *    addressed to the messaging network, not to Hula — it carries no content intent
+ *    at all. On a real device a bare "START" (sent to restore delivery after
+ *    Sendblue read "Cancel" as an opt-out) fell through this cascade to the general
+ *    brain, which fabricated "Cancelled — no worries. Both tasks left as they were."
+ *    No such tasks existed. Nothing downstream can safely interpret a transport
+ *    command, so nothing downstream ever sees one.
+ *  - `memory` and `reminder` keep absolute priority over the CONTENT handlers — they
+ *    are the user's own stored data and must never be reinterpreted as an email or
+ *    calendar request.
  *  - `confirmation` must precede every write handler, so "no, cancel" always
  *    abandons a pending action and can never be re-read as a fresh command.
+ *  - `entityFollowup` sits directly BELOW `confirmation` and ABOVE every provider
+ *    handler. A bare follow-up ("the second one", "change its priority", "it") has
+ *    no meaning of its own — it means whatever the last grounded list was about —
+ *    so no fixed handler ORDER can route it correctly. Whoever sits highest would
+ *    win every ambiguous pronoun forever, which is exactly what happened: Gmail's
+ *    draft-edit gate matches a bare "change", so "Change the second one's priority
+ *    to high" (said to a Todoist list) was answered with "I'm not sure which draft
+ *    you mean". This step asks the only question that settles it — what were we
+ *    just talking about? — and claims ONLY when the answer is Todoist, leaving
+ *    every existing Gmail/Calendar path byte-for-byte unchanged.
  *  - `gmailDraftFollowup` precedes `gmailDraftLifecycle` so "send the draft" sends
  *    rather than being read as a draft command.
  *  - `gmailCommand` precedes `gmailWrite` so "archive those" is never extracted as a
@@ -113,19 +143,52 @@ export interface RoutedReply {
  *  - `calendarRead` FOLLOWS `calendar` (Section 18) for the mirror-image reason: the
  *    regex path's fixed shapes are tested and free, so they keep priority, and the
  *    model-backed reader only takes what they decline (arbitrary ranges, search).
+ *  - `todoistUndo` FOLLOWS `calendarUndo` for the same reason Calendar's follows
+ *    Gmail's: a bare "undo that" after an email or calendar action must keep meaning
+ *    that action. Todoist's undo only takes it when neither has anything to reverse,
+ *    and it declines unless a VERIFIED Todoist action exists to invert.
+ *  - `todoistWrite` / `todoistRead` PRECEDE the Calendar handlers (Section 19
+ *    correction). They originally sat below everything, on the principle that an
+ *    established path keeps priority — and that was WRONG in a way only a real
+ *    device showed: "add finish the pitch deck to my work project for Friday at 5"
+ *    was claimed by `calendarWrite`, whose model extractor happily reads "… for
+ *    Friday at 5" as an event. The user got a calendar-event confirmation for a
+ *    request that never mentioned a calendar, twice.
+ *
+ *    Ordering alone cannot fix that (a request has to reach Todoist BEFORE Calendar
+ *    interprets it), and neither can Calendar's extractor be trusted to decline —
+ *    it is doing exactly what it was built to do. So Todoist goes first, and safety
+ *    comes from the GATE instead: `shouldConsiderTodoist` demands explicit
+ *    task-domain vocabulary (task/todoist/project/label/overdue/complete/…), and the
+ *    model extractor is a second gate that returns `not_todoist_write` for anything
+ *    that is really a meeting. "Book a meeting with Sam on Friday" fails the gate at
+ *    step one and reaches Calendar untouched; "schedule a project review Friday"
+ *    passes the gate but the extractor declines it, and it reaches Calendar too.
+ *  - CRUCIALLY, both still sit below `reminder`, which keeps ABSOLUTE priority.
+ *    "Remind me to call Rob tomorrow" is claimed by the reminder handler and never
+ *    reaches Todoist, so established reminder behaviour is untouched.
  *  - `pendingReprompt` is LAST: while a confirmable action is pending, an
  *    unrecognised reply must never reach the brain, which could fabricate a success.
  */
 function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
   return [
+    { name: "transportKeyword", run: deps.transportKeyword ?? handleTransportKeyword },
     { name: "memory", run: deps.memory ?? handleMemoryCommand },
     { name: "reminder", run: deps.reminder ?? handleReminderCommand },
     { name: "confirmation", run: deps.confirmation ?? handleActionConfirmation },
+    // Cross-provider follow-up arbitration. See the header note: cascade ORDER
+    // cannot decide who owns "the second one" — only the last grounded list can.
+    { name: "entityFollowup", run: deps.entityFollowup ?? handleEntityFollowup },
     { name: "gmailClarify", run: deps.gmailClarify ?? handleGmailClarification },
     { name: "gmailDraftFollowup", run: deps.gmailDraftFollowup ?? handleGmailDraftFollowup },
     { name: "gmailDraftLifecycle", run: deps.gmailDraftLifecycle ?? handleGmailDraftLifecycle },
     { name: "gmailCommand", run: deps.gmailCommand ?? handleGmailCommand },
     { name: "calendarUndo", run: deps.calendarUndo ?? handleCalendarUndo },
+    // Todoist precedes Calendar: a task request must reach Todoist before
+    // Calendar's extractor reads its due date as an event. See the header note.
+    { name: "todoistUndo", run: deps.todoistUndo ?? handleTodoistUndo },
+    { name: "todoistWrite", run: deps.todoistWrite ?? handleTodoistWrite },
+    { name: "todoistRead", run: deps.todoistRead ?? handleTodoistRead },
     { name: "calendarWrite", run: deps.calendarWrite ?? handleCalendarWrite },
     { name: "gmailWrite", run: deps.gmailWrite ?? handleGmailWrite },
     { name: "actionIntent", run: deps.actionIntent ?? handleActionIntent },

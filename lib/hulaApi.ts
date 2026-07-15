@@ -568,6 +568,86 @@ export async function disconnectGmail(
   return disconnectIntegration(token, GMAIL_PROVIDER);
 }
 
+// --- Todoist (Section 19) ------------------------------------------------
+// Same shape as the Google flows: the app only ever receives an authorization
+// URL and safe status metadata. Tokens live on the backend and never reach here.
+
+/** The backend Todoist provider slug. */
+export const TODOIST_PROVIDER = 'todoist';
+
+/**
+ * Raised when the backend can't start the Todoist OAuth flow because its Todoist
+ * OAuth env is not configured (a safe 400, not a crash).
+ */
+export class TodoistNotConfiguredError extends Error {
+  constructor() {
+    super('Todoist connect is not configured on the Hula backend yet.');
+    this.name = 'TodoistNotConfiguredError';
+  }
+}
+
+/** Response of `POST /v1/me/integrations/todoist/connect`. */
+export interface TodoistConnectResponse {
+  provider: string;
+  /** The Todoist consent URL to open in the system browser. */
+  authorizationUrl: string;
+  /** ISO timestamp after which the pending OAuth state expires. */
+  expiresAt: string;
+}
+
+/**
+ * Start the Todoist OAuth flow. Returns ONLY an authorization URL (plus safe
+ * metadata) — never a token. The caller opens `authorizationUrl` in the system
+ * browser; Todoist redirects back to the backend callback, which stores the
+ * encrypted tokens. The app then re-reads status to learn the result.
+ */
+export async function connectTodoist(
+  token: string,
+  params: { appReturnUrl?: string } = {},
+): Promise<TodoistConnectResponse> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+
+  const res = await fetch(
+    `${BASE_URL}/v1/me/integrations/${TODOIST_PROVIDER}/connect`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(
+        params.appReturnUrl ? { appReturnUrl: params.appReturnUrl } : {},
+      ),
+    },
+  );
+
+  if (res.status === 400) {
+    // Backend returns `{ error: "todoist_not_configured" }` here.
+    throw new TodoistNotConfiguredError();
+  }
+  if (!res.ok) {
+    throw new Error(`todoist/connect failed (${res.status})`);
+  }
+
+  const data = (await res.json()) as Partial<TodoistConnectResponse>;
+  if (typeof data.authorizationUrl !== 'string' || data.authorizationUrl.length === 0) {
+    throw new Error('todoist/connect returned no authorization URL');
+  }
+  return data as TodoistConnectResponse;
+}
+
+/** Fetch the signed-in user's Todoist connection status (backend is the truth). */
+export async function fetchTodoistStatus(token: string): Promise<IntegrationStatus> {
+  return fetchIntegrationStatus(token, TODOIST_PROVIDER);
+}
+
+/** Disconnect Todoist for the signed-in user (idempotent). */
+export async function disconnectTodoist(
+  token: string,
+): Promise<{ ok: boolean; changed: boolean }> {
+  return disconnectIntegration(token, TODOIST_PROVIDER);
+}
+
 /** A single safe, normalized Gmail message (metadata + snippet only, no body). */
 export interface GmailMessage {
   id: string;

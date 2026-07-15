@@ -5,6 +5,7 @@ import { googleCalendarRouter } from "./routes/googleCalendar";
 import { healthRouter } from "./routes/health";
 import { linkSessionsRouter } from "./routes/linkSessions";
 import { meRouter } from "./routes/me";
+import { todoistRouter } from "./routes/todoist";
 import { sendblueWebhookRouter } from "./routes/webhooks";
 
 /**
@@ -19,11 +20,12 @@ export function createApp(): Express {
   // Routes
   app.use(healthRouter);
   app.use(linkSessionsRouter);
-  // Provider-specific Google Calendar + Gmail routes must precede the generic
-  // `/v1/me/integrations/:provider*` routes in meRouter so they aren't captured
-  // as a provider slug.
+  // Provider-specific Google Calendar + Gmail + Todoist routes must precede the
+  // generic `/v1/me/integrations/:provider*` routes in meRouter so they aren't
+  // captured as a provider slug.
   app.use(googleCalendarRouter);
   app.use(gmailRouter);
+  app.use(todoistRouter);
   app.use(meRouter);
   app.use(sendblueWebhookRouter);
 

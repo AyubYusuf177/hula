@@ -13,7 +13,7 @@
 import type { ImageSourcePropType } from 'react-native';
 
 import { integrationIcons } from '@/constants/images';
-import { GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER } from '@/lib/hulaApi';
+import { GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER, TODOIST_PROVIDER } from '@/lib/hulaApi';
 
 /** A display category grouping on the Integrations screen. */
 export type IntegrationCategoryId = 'ORGANIZATION';
@@ -80,6 +80,26 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
       'Hula can read and search your inbox to answer email questions from iMessage. Read-only — it never sends, deletes or changes your email.',
     connectLabel: 'Connect Gmail',
     disconnectLabel: 'Disconnect Gmail',
+  },
+  {
+    id: TODOIST_PROVIDER,
+    displayName: 'Todoist',
+    category: 'ORGANIZATION',
+    iconImage: integrationIcons.todoist,
+    // Todoist's own brand red, from the official icon.
+    accent: '#E44332',
+    // Copy describes REAL, shipped capability. Todoist is the first integration
+    // where Hula both reads and writes, so — unlike the read-only Calendar/Gmail
+    // copy — it says so plainly, including the parts that ask first.
+    summary: 'Reads and manages your tasks from iMessage.',
+    sheetHeading: 'Todoist',
+    connectedHeading: 'Todoist',
+    sheetBody:
+      'Connect Todoist to run your task list from iMessage. Hula can tell you what’s due, overdue or coming up, and add, reschedule, re-prioritise, complete and reopen tasks. Deleting a task, or changing several at once, always asks you first.',
+    connectedBody:
+      'Hula can read your tasks and add, edit, reschedule, move, complete and reopen them from iMessage. Deleting a task, or changing several at once, always asks you first.',
+    connectLabel: 'Connect Todoist',
+    disconnectLabel: 'Disconnect Todoist',
   },
 ] as const;
 

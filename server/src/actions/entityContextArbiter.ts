@@ -1,0 +1,324 @@
+import { listRecentProposalsByAction, type ActionProposalView } from "./proposals";
+
+/**
+ * Cross-provider entity-context arbitration.
+ *
+ * THE REAL FAILURE THIS FIXES. A user listed their Todoist tasks, saw a numbered
+ * list, and said "Change the second one's priority to high". Hula replied:
+ *
+ *     "I'm not sure which draft you mean — try 'show me my drafts' first."
+ *
+ * Nothing about that message concerns email. It was intercepted by the Gmail
+ * DRAFT LIFECYCLE handler, which sits above Todoist in the cascade and whose gate
+ * matches a bare "change" (a deliberately broad edit hint, safe on its own terms).
+ * The extractor then read it as a draft edit, found no draft, and answered.
+ *
+ * THE DEEPER PROBLEM. Cascade order alone cannot arbitrate follow-ups. "The second
+ * one" is meaningless in isolation — its meaning comes ENTIRELY from the last
+ * grounded list the user was shown. A fixed handler order asks "who matches first?"
+ * when the only correct question is "what were we just talking about?". Whichever
+ * provider sits highest wins every ambiguous pronoun, forever, regardless of
+ * context. Moving Todoist above Gmail would simply invert the same bug.
+ *
+ * THE RULE, in priority order:
+ *   1. EXPLICIT TYPED SEMANTICS WIN. "priority"/"task"/"project" mean Todoist;
+ *      "draft"/"subject"/"recipient" mean Gmail drafts; "meeting"/"attendee" mean
+ *      Calendar. A user who names the entity is never overruled by stale context.
+ *   2. CONFLICTING EXPLICIT SEMANTICS FAIL CLOSED. "Change the second draft's
+ *      priority" names two different entities; guessing would mutate the wrong
+ *      provider, so Hula asks.
+ *   3. OTHERWISE THE MOST RECENT GROUNDED CONTEXT DECIDES. Generic verbs
+ *      ("change", "move", "delete the first one") belong to whatever list is
+ *      actually on screen.
+ *   4. NO CONTEXT AND NO SEMANTICS → no owner. The cascade proceeds unchanged.
+ *
+ * This REUSES the existing durable contexts (each provider already persists its
+ * numbered list and acted-entity under a pseudo `actionId` in the shared proposal
+ * store). It adds NO new memory, writes nothing, and calls no provider — it is a
+ * pure read that answers one question: whose follow-up is this?
+ */
+
+/**
+ * The entity kinds a follow-up can be about.
+ *
+ * `memory_item` has no numbered result set of its own — it exists here so an
+ * EXPLICIT memory reference ("delete that memory") is recognised as naming another
+ * provider, and is therefore never routed to Todoist by a stale task context.
+ */
+export type EntityKind =
+  | "todoist_task"
+  | "gmail_email"
+  | "gmail_draft"
+  | "calendar_event"
+  | "memory_item";
+
+/**
+ * The pseudo action ids each provider already persists context under.
+ *
+ * Duplicated as literals rather than imported from the provider modules on
+ * purpose: importing them would make this low-level arbiter depend on every
+ * provider package (and on their handler imports), which is a cycle waiting to
+ * happen. The ids are a stable storage contract, and the tests pin them.
+ */
+export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" }[] = [
+  { actionId: "todoist.lastSelection", kind: "todoist_task" },
+  { actionId: "todoist.entityContext", kind: "todoist_task" },
+  { actionId: "calendar.lastSelection", kind: "calendar_event" },
+  { actionId: "calendar.entityContext", kind: "calendar_event" },
+  // Gmail stores messages AND drafts under ONE selection id, distinguished by the
+  // payload's `itemKind` — so the row's own data decides which it is.
+  { actionId: "email.lastSelection", kind: "gmail_either" },
+  { actionId: "email.entityContext", kind: "gmail_email" },
+  { actionId: "email.lastDraft", kind: "gmail_draft" },
+];
+
+// --- Follow-up shape (PURE) ----------------------------------------------
+
+/**
+ * PURE: is this message a bare ordinal/pronoun follow-up?
+ *
+ * These are the messages whose meaning lives entirely in the previous turn. A
+ * message that names its own target ("complete the pitch deck task") does not need
+ * arbitration — it is self-describing and the normal cascade handles it.
+ */
+export function isFollowupShape(text: string | undefined): boolean {
+  const t = (text ?? "").trim().toLowerCase();
+  if (!t) return false;
+  if (/^#?\d{1,2}\.?$/.test(t)) return true;
+  if (/\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)\s+one\b/.test(t)) {
+    return true;
+  }
+  // "the second one's priority", "the second task", "the 2nd"
+  if (/\b(?:first|second|third|fourth|fifth|last)\b/.test(t)) return true;
+  if (/\b\d{1,2}(?:st|nd|rd|th)\b/.test(t)) return true;
+  if (/\ball\s+(?:of\s+)?(?:them|those|these)\b/.test(t)) return true;
+  if (/\b(?:it|its|that|this|them|those|these|they)\b/.test(t)) return true;
+  return false;
+}
+
+// --- Typed semantics (PURE) ----------------------------------------------
+
+/**
+ * PURE: the entity kinds a message NAMES outright.
+ *
+ * Each pattern is a noun (or a state verb) that belongs to exactly one provider's
+ * vocabulary. Deliberately NARROW: a generic verb like "change", "move" or
+ * "delete" names nothing and must never appear here — letting "change" imply an
+ * entity is precisely how a Todoist follow-up became a Gmail draft edit.
+ */
+export function explicitEntityKinds(text: string | undefined): EntityKind[] {
+  const t = (text ?? "").trim().toLowerCase();
+  if (!t) return [];
+  const kinds = new Set<EntityKind>();
+
+  // Todoist: task-app nouns and lifecycle states.
+  if (
+    /\bpriority\b/.test(t) ||
+    /\btasks?\b/.test(t) ||
+    /\bto-?dos?\b/.test(t) ||
+    /\bprojects?\b/.test(t) ||
+    /\bsections?\b/.test(t) ||
+    /\blabels?\b/.test(t) ||
+    /\btodoist\b/.test(t) ||
+    /\bcomplete[ds]?\b/.test(t) ||
+    /\breopen\b/.test(t) ||
+    /\boverdue\b/.test(t)
+  ) {
+    kinds.add("todoist_task");
+  }
+
+  // Gmail drafts: composition nouns.
+  if (
+    /\bdrafts?\b/.test(t) ||
+    /\bsubject\b/.test(t) ||
+    /\brecipients?\b/.test(t) ||
+    /\b(?:email|message)\s+body\b/.test(t) ||
+    /\bbody\b/.test(t)
+  ) {
+    kinds.add("gmail_draft");
+  }
+
+  // Gmail messages: inbox nouns and mail-specific verbs.
+  if (
+    /\breply\b/.test(t) ||
+    /\bemails?\b/.test(t) ||
+    /\binbox\b/.test(t) ||
+    /\bsenders?\b/.test(t) ||
+    /\bunread\b/.test(t) ||
+    /\barchive\b/.test(t)
+  ) {
+    kinds.add("gmail_email");
+  }
+
+  // Calendar: event nouns.
+  if (
+    /\bmeetings?\b/.test(t) ||
+    /\bevents?\b/.test(t) ||
+    /\battendees?\b/.test(t) ||
+    /\bcalendars?\b/.test(t) ||
+    /\bgoogle\s+meet\b/.test(t) ||
+    /\binvites?\b/.test(t)
+  ) {
+    kinds.add("calendar_event");
+  }
+
+  // Memory: the user's own saved facts. A user who says "memory" means memory,
+  // whatever list happens to be on screen.
+  if (/\bmemor(?:y|ies)\b/.test(t)) kinds.add("memory_item");
+
+  return [...kinds];
+}
+
+/**
+ * PURE: is this a DESTRUCTIVE follow-up naming only a pronoun ("delete it")?
+ *
+ * These are the messages that must never be answered on a guess. If no provider
+ * owns one, the honest outcome is a question — letting it fall through to the
+ * general brain risks a fabricated "Deleted!" for something that still exists.
+ */
+export function isDestructiveFollowup(text: string | undefined): boolean {
+  const t = (text ?? "").trim().toLowerCase();
+  if (!t) return false;
+  if (!/^(?:please\s+)?(?:delete|remove|forget|clear|bin|trash)\b/.test(t)) return false;
+  return isFollowupShape(t);
+}
+
+/**
+ * PURE: collapse kinds that are not really in conflict.
+ *
+ * "Change the second draft's body" names `draft` AND `body` — both Gmail drafts,
+ * so one kind. But "the second EMAIL's body" names a message and a draft noun,
+ * which within Gmail is not a cross-provider conflict worth interrupting for: both
+ * resolve inside the Gmail handlers, which already know how to tell them apart.
+ * Only a genuinely CROSS-PROVIDER disagreement is a conflict.
+ */
+export function toProviderFamilies(kinds: readonly EntityKind[]): string[] {
+  const families = new Set<string>();
+  for (const kind of kinds) {
+    families.add(kind === "gmail_email" || kind === "gmail_draft" ? "gmail" : kind);
+  }
+  // `memory_item` is its own family: "delete that memory" vs a task is a genuine
+  // cross-provider question, not a within-Gmail nuance.
+  return [...families];
+}
+
+// --- Grounded context (I/O, injectable) ----------------------------------
+
+/** A grounded context the user was actually shown, with when it was established. */
+export interface GroundedContext {
+  kind: EntityKind;
+  /** ms since epoch — used only to pick the most recent. */
+  at: number;
+}
+
+export interface ArbiterDeps {
+  listRecent?: (userId: string, actionId: string) => Promise<ActionProposalView[]>;
+  now?: Date;
+}
+
+/** PURE: read Gmail's selection payload to tell messages from drafts. */
+function gmailKindFromRow(row: ActionProposalView): EntityKind {
+  const itemKind = (row.input as { itemKind?: unknown } | null)?.itemKind;
+  return itemKind === "drafts" ? "gmail_draft" : "gmail_email";
+}
+
+/**
+ * Load every live grounded context for a user, newest first.
+ *
+ * Expired rows are SKIPPED — a list the user can no longer see must not decide
+ * what "the second one" means. Rows are user-scoped by the store, so one user's
+ * context can never arbitrate another's message.
+ */
+export async function loadGroundedContexts(
+  userId: string,
+  deps: ArbiterDeps = {},
+): Promise<GroundedContext[]> {
+  const listRecent = deps.listRecent ?? listRecentProposalsByAction;
+  const nowMs = (deps.now ?? new Date()).getTime();
+  const found: GroundedContext[] = [];
+
+  for (const source of CONTEXT_SOURCES) {
+    let rows: ActionProposalView[];
+    try {
+      rows = await listRecent(userId, source.actionId);
+    } catch {
+      // A lookup failure must never fabricate an owner — treat as no context.
+      continue;
+    }
+    for (const row of rows) {
+      if (Date.parse(row.expiresAt) <= nowMs) continue;
+      const at = Date.parse(row.createdAt);
+      if (!Number.isFinite(at)) continue;
+      found.push({
+        kind: source.kind === "gmail_either" ? gmailKindFromRow(row) : source.kind,
+        at,
+      });
+    }
+  }
+
+  return found.sort((a, b) => b.at - a.at);
+}
+
+// --- Arbitration ---------------------------------------------------------
+
+/** Who owns this follow-up. */
+export type FollowupOwner =
+  | { kind: "owner"; owner: EntityKind; reason: "explicit" | "context" }
+  | { kind: "conflict"; clarification: string }
+  | { kind: "none" };
+
+/** PURE: a precise, non-mutating clarification for a cross-provider conflict. */
+export function conflictClarification(kinds: readonly EntityKind[]): string {
+  const label: Record<EntityKind, string> = {
+    todoist_task: "a Todoist task",
+    gmail_email: "an email",
+    gmail_draft: "an email draft",
+    calendar_event: "a calendar event",
+    memory_item: "something I’ve remembered",
+  };
+  const names = [...new Set(kinds.map((k) => label[k]))];
+  const list =
+    names.length === 2
+      ? `${names[0]} or ${names[1]}`
+      : `${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`;
+  return `Do you mean ${list}? I don’t want to change the wrong thing — tell me which and I’ll do it.`;
+}
+
+/**
+ * Decide who owns a follow-up. Never throws; never writes; never calls a provider.
+ *
+ * Returns `none` for anything that isn't a follow-up, or where neither explicit
+ * semantics nor a live context can say — in which case the caller leaves the
+ * cascade completely unchanged.
+ */
+export async function resolveFollowupOwner(
+  userId: string,
+  text: string | undefined,
+  deps: ArbiterDeps = {},
+): Promise<FollowupOwner> {
+  if (!isFollowupShape(text)) return { kind: "none" };
+
+  const explicit = explicitEntityKinds(text);
+  const families = toProviderFamilies(explicit);
+
+  // 2. Cross-provider disagreement inside one message → ask, never guess.
+  if (families.length > 1) {
+    return { kind: "conflict", clarification: conflictClarification(explicit) };
+  }
+
+  // 1. A single named entity wins outright, even over a more recent context.
+  if (explicit.length === 1) {
+    return { kind: "owner", owner: explicit[0]!, reason: "explicit" };
+  }
+  if (explicit.length > 1) {
+    // Same family (e.g. draft + body). Prefer the more specific draft kind.
+    const owner = explicit.includes("gmail_draft") ? "gmail_draft" : explicit[0]!;
+    return { kind: "owner", owner, reason: "explicit" };
+  }
+
+  // 3. Otherwise: whatever the user is actually looking at.
+  const contexts = await loadGroundedContexts(userId, deps);
+  const newest = contexts[0];
+  if (!newest) return { kind: "none" };
+  return { kind: "owner", owner: newest.kind, reason: "context" };
+}

@@ -132,10 +132,11 @@ check("registry: every action has complete, typed metadata", () => {
   }
 });
 
-check("registry: implemented actions are the calendar reads/writes + Gmail draft/send", () => {
+check("registry: implemented actions are the calendar/Gmail/Todoist adapters", () => {
   const implemented = ACTION_DEFINITIONS.filter((a) => a.implemented).map((a) => a.actionId);
   // Section 16 added real Gmail draft creation + send to the Section 11 calendar
-  // reads; Section 17 adds the confirmation-gated calendar event writes.
+  // reads; Section 17 adds the confirmation-gated calendar event writes; Section 19
+  // adds the Todoist task lifecycle.
   assert.deepEqual(implemented.sort(), [
     "calendar.cancelEvent",
     "calendar.createEvent",
@@ -149,6 +150,12 @@ check("registry: implemented actions are the calendar reads/writes + Gmail draft
     "email.trash",
     "email.untrash",
     "email.updateDraft",
+    "task.complete",
+    "task.create",
+    "task.delete",
+    "task.move",
+    "task.reopen",
+    "task.update",
   ]);
   // No implemented action is a purchase/destructive risk.
   for (const a of ACTION_DEFINITIONS) {
@@ -235,12 +242,56 @@ check("registry: the `modify` rung is only used for reversible, non-external act
   // A guard on the rung itself. `modify` skips confirmation, so anything filed
   // there that could actually lose data or reach another person would silently
   // bypass the one gate protecting the user.
-  const allowed = new Set(["email.modifyLabels", "email.untrash"]);
+  const allowed = new Set([
+    "email.modifyLabels",
+    "email.untrash",
+    // Section 19 — the Todoist task lifecycle. Each earns the rung on the same two
+    // tests the rung defines, and the reasoning is stated rather than assumed:
+    //
+    //  task.create   reversible by deleting it; nothing existed to destroy; the
+    //                task is visible only in the user's own account.
+    //  task.update   reversible by editing back; changes only fields the user owns.
+    //  task.move     reversible by moving back; the task itself is untouched.
+    //  task.complete reversible by task.reopen — Todoist keeps the task and its
+    //                history, so completing destroys nothing.
+    //  task.reopen   restorative: it puts a task BACK. Nothing can be lost.
+    //
+    // task.delete is deliberately ABSENT: Todoist does not trash a deleted task, so
+    // it is irreversible and stays on `write` with confirmationRequired.
+    "task.create",
+    "task.update",
+    "task.move",
+    "task.complete",
+    "task.reopen",
+  ]);
   for (const a of ACTION_DEFINITIONS) {
     if (a.riskLevel !== "modify") continue;
     assert.ok(
       allowed.has(a.actionId),
       `${a.actionId} is on the no-confirmation \`modify\` rung — prove it is reversible and non-external, then allowlist it here`,
+    );
+  }
+});
+
+check("registry: Todoist deletion is irreversible, so it never sits on `modify`", () => {
+  // The single most important Todoist policy fact, pinned. Todoist does NOT trash a
+  // deleted task — there is no untrash to reach for — so a delete that skipped
+  // confirmation would be unrecoverable data loss on a natural-language guess.
+  const del = ACTION_DEFINITIONS.find((a) => a.actionId === "task.delete");
+  assert.ok(del);
+  assert.equal(del.riskLevel, "write");
+  assert.equal(del.confirmationRequired, true);
+  // And it is the ONLY Todoist action needing the optional delete scope, so
+  // declining that scope costs deletion alone.
+  assert.deepEqual(del.requiredScopes, ["data:delete"]);
+  assert.deepEqual(del.requiredCapabilities, ["tasks.delete"]);
+
+  for (const a of ACTION_DEFINITIONS) {
+    if (a.category !== "tasks" || a.actionId === "task.delete") continue;
+    assert.equal(
+      a.requiredScopes.includes("data:delete"),
+      false,
+      `${a.actionId} must not require the optional delete scope`,
     );
   }
 });
@@ -303,10 +354,11 @@ check("policy: read action BLOCKED when scope not granted", () => {
 });
 
 check("policy: stub write action returns not_implemented", () => {
-  // `task.create` is still a genuine stub (the calendar writes stopped being one in
-  // Section 17). `implemented` is checked before connection/scope, so this holds
-  // regardless of context.
-  const action = getActionDefinition("task.create") as ActionDefinition;
+  // `document.appendText` is still a genuine stub. (`task.create` used to be this
+  // example; Section 19 gave it a real Todoist adapter, so the example moved rather
+  // than the rule changing.) `implemented` is checked BEFORE connection/scope, so
+  // this holds regardless of context.
+  const action = getActionDefinition("document.appendText") as ActionDefinition;
   const result = evaluateActionForUser(action, connectedCalendarContext(true));
   assert.equal(result.allowed, false);
   assert.equal(result.blockedReason, "not_implemented");
@@ -495,10 +547,12 @@ asyncCheck("executor: calendar read routes through the read helper, no token lea
 
 asyncCheck("executor: stub write action is blocked with an honest message", async () => {
   const recorded: RecordExecutionInput[] = [];
+  // `document.appendText` replaces `task.create` here for the same reason as the
+  // policy test above: Todoist gave task.create a real adapter in Section 19.
   const result = await executeAction(
     "user_fake",
-    "task.create",
-    { input: { title: "Call the bank" } },
+    "document.appendText",
+    { input: { documentId: "doc_1", text: "hello" } },
     {
       buildContext: async () => connectedCalendarContext(true),
       record: async (_userId, input) => {
@@ -510,7 +564,34 @@ asyncCheck("executor: stub write action is blocked with an honest message", asyn
   assert.equal(result.ok, false);
   assert.equal(result.status, "blocked");
   assert.equal(recorded[0]?.status, "blocked");
-  assert.ok(/can't add tasks yet/i.test(result.userMessage), "must stay honest");
+  assert.ok(/can't write to your documents yet/i.test(result.userMessage), "must stay honest");
+});
+
+asyncCheck("executor: Todoist writes are blocked when Todoist is not connected", async () => {
+  // The replacement for what `task.create` used to prove. It is no longer a stub,
+  // so the honest refusal now comes from the CONNECTION gate rather than from
+  // `implemented:false` — and it must still never reach a provider.
+  const recorded: RecordExecutionInput[] = [];
+  const result = await executeAction(
+    "user_fake",
+    "task.create",
+    { input: { content: "Call the bank" } },
+    {
+      // A calendar-only context: Todoist is absent.
+      buildContext: async () => connectedCalendarContext(true),
+      record: async (_userId, input) => {
+        recorded.push(input);
+        return "exec_todoist_blocked";
+      },
+      createTodoistTask: async () => {
+        throw new Error("must not reach Todoist when it is not connected");
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "blocked");
+  assert.equal(recorded[0]?.status, "blocked");
+  assert.ok(/connect Todoist/i.test(result.userMessage), "must name the real problem");
 });
 
 asyncCheck(

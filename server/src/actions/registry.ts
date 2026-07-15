@@ -492,44 +492,184 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     userFacingDescription:
       "I couldn’t restore that email just now — mind trying again in a moment?",
   },
-  // --- Tasks -------------------------------------------------------------
+  // --- Tasks (Todoist, Section 19) ---------------------------------------
+  //
+  // WHY THESE SIT ON THE `modify` RUNG. The risk ladder forces a confirmation for
+  // anything marked `write`. Creating, editing, completing, reopening, or moving a
+  // SINGLE task is reversible, invisible outside the user's own account, and
+  // destroys nothing — the exact definition of the `modify` rung (see
+  // `integrations/policy.ts`). The section requires these to execute immediately
+  // once the target is unambiguous, and prompting for each one would train users
+  // to reflex-approve, eroding the confirmation on the rungs that matter
+  // (deletion, bulk). `email.modifyLabels` set the same precedent.
+  //
+  // BULK is NOT expressed here. Confirmation for "complete all of those" is
+  // enforced by the HANDLER (`todoistActions`), which is the only layer that knows
+  // how many tasks a request resolved to. A registry flag cannot express "one is
+  // fine, five needs asking".
   {
     actionId: "task.create",
     category: "tasks",
     displayName: "Create task",
-    description: "Create a task in the user's connected task app.",
-    providerTypes: ["asana"],
+    description:
+      "Create a task in Todoist (Section 19). Title, description, due date/time, recurring " +
+      "expression, project, section, labels, and priority all arrive ALREADY RESOLVED.",
+    providerTypes: ["todoist"],
     requiredCapabilities: ["tasks.write"],
-    requiredScopes: ["tasks:write"],
-    riskLevel: "write",
-    confirmationRequired: true,
-    implemented: false,
+    requiredScopes: ["data:read_write"],
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
-      { name: "title", type: "string", required: true, description: "Task title." },
-      { name: "due", type: "datetime", required: false, description: "Optional due date." },
+      { name: "content", type: "string", required: true, description: "Task title." },
+      { name: "description", type: "string", required: false, description: "Optional detail." },
+      { name: "dueDate", type: "string", required: false, description: "All-day due (YYYY-MM-DD)." },
+      { name: "dueDatetime", type: "datetime", required: false, description: "Timed due (ISO 8601)." },
+      { name: "dueString", type: "string", required: false, description: "Recurring expression, e.g. 'every Monday'." },
+      { name: "projectId", type: "string", required: false, description: "Resolved project id." },
+      { name: "sectionId", type: "string", required: false, description: "Resolved section id." },
+      { name: "labels", type: "string[]", required: false, description: "Resolved label names." },
+      { name: "priority", type: "number", required: false, description: "RAW API priority (1..4; 4 = urgent)." },
+      {
+        name: "requestId",
+        type: "string",
+        required: false,
+        description:
+          "Generated ONCE at proposal time and replayed, so a duplicate delivery reuses Todoist's de-duplication instead of creating a second task.",
+      },
     ],
-    examples: ["create a task to call the bank", "add a to-do to renew my passport"],
+    examples: [
+      "add finish the pitch deck to my work project for Friday at 5",
+      "add a task to call the bank",
+    ],
     userFacingDescription:
-      "I can't add tasks yet — no task app is connected. Want me to keep it in mind here instead?",
+      "I couldn’t add that task just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "task.update",
+    category: "tasks",
+    displayName: "Update task",
+    description:
+      "Update an existing Todoist task: rename, edit description, change or remove the due " +
+      "date/time, reschedule, change priority, add/remove labels. The task id and every value " +
+      "arrive ALREADY RESOLVED and the task is re-fetched before the write.",
+    providerTypes: ["todoist"],
+    requiredCapabilities: ["tasks.write"],
+    requiredScopes: ["data:read_write"],
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "taskIds", type: "string[]", required: true, description: "Tasks to update." },
+      { name: "content", type: "string", required: false, description: "New title." },
+      { name: "description", type: "string", required: false, description: "New description." },
+      { name: "dueDate", type: "string", required: false, description: "New all-day due." },
+      { name: "dueDatetime", type: "datetime", required: false, description: "New timed due." },
+      { name: "dueString", type: "string", required: false, description: "New recurring expression." },
+      { name: "removeDue", type: "boolean", required: false, description: "Clear the due date." },
+      { name: "labels", type: "string[]", required: false, description: "The COMPLETE new label set (merged at proposal time)." },
+      { name: "priority", type: "number", required: false, description: "RAW API priority (1..4)." },
+    ],
+    examples: ["move the second task to Monday", "change its priority to high", "add the label work"],
+    userFacingDescription:
+      "I couldn’t change that task just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "task.move",
+    category: "tasks",
+    displayName: "Move task",
+    description:
+      "Move a Todoist task to a different project or section. A SEPARATE action because " +
+      "Todoist's update endpoint cannot move a task — it silently ignores project_id and " +
+      "answers 200, so a move must go through /tasks/{id}/move.",
+    providerTypes: ["todoist"],
+    requiredCapabilities: ["tasks.write"],
+    requiredScopes: ["data:read_write"],
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "taskIds", type: "string[]", required: true, description: "Tasks to move." },
+      { name: "projectId", type: "string", required: false, description: "Resolved destination project id." },
+      { name: "sectionId", type: "string", required: false, description: "Resolved destination section id." },
+    ],
+    examples: ["put that in my Hula project", "move it to the Later section"],
+    userFacingDescription:
+      "I couldn’t move that task just now — mind trying again in a moment?",
   },
   {
     actionId: "task.complete",
     category: "tasks",
     displayName: "Complete task",
-    description: "Mark a task complete in the connected task app.",
-    providerTypes: ["asana"],
+    description:
+      "Mark Todoist tasks complete. Reversible via task.reopen, which is why it needs no " +
+      "confirmation for a single unambiguous task. Completion is VERIFIED by re-reading — a " +
+      "204 alone is not reported as done.",
+    providerTypes: ["todoist"],
     requiredCapabilities: ["tasks.write"],
-    requiredScopes: ["tasks:write"],
-    riskLevel: "write",
-    confirmationRequired: true,
-    implemented: false,
+    requiredScopes: ["data:read_write"],
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
     enabled: true,
     inputSchema: [
-      { name: "taskId", type: "string", required: true, description: "Task to complete." },
+      { name: "taskIds", type: "string[]", required: true, description: "Tasks to complete." },
     ],
-    examples: ["mark the passport task done", "complete my call-the-bank task"],
-    userFacingDescription: "I can't update tasks yet — no task app is connected.",
+    examples: ["mark the first one complete", "complete all of those", "tick that off"],
+    userFacingDescription:
+      "I couldn’t complete that task just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "task.reopen",
+    category: "tasks",
+    displayName: "Reopen task",
+    description:
+      "Reopen completed Todoist tasks. Restorative — it puts a task BACK — so nothing is lost " +
+      "and no confirmation is required.",
+    providerTypes: ["todoist"],
+    requiredCapabilities: ["tasks.write"],
+    requiredScopes: ["data:read_write"],
+    riskLevel: "modify",
+    confirmationRequired: false,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "taskIds", type: "string[]", required: true, description: "Tasks to reopen." },
+    ],
+    examples: ["reopen the task I just completed", "undo that", "put that back on my list"],
+    userFacingDescription:
+      "I couldn’t reopen that task just now — mind trying again in a moment?",
+  },
+  {
+    actionId: "task.delete",
+    category: "tasks",
+    displayName: "Delete task",
+    description:
+      "Permanently delete Todoist tasks (Section 19). Todoist does NOT trash a deleted task — " +
+      "it is irreversible — so this ALWAYS requires explicit confirmation and a preview that " +
+      "says it is permanent. Deletion is VERIFIED by absence, never assumed from a 204.",
+    providerTypes: ["todoist"],
+    requiredCapabilities: ["tasks.delete"],
+    // The one action needing data:delete. A user who declined it keeps every
+    // other capability and only this refuses — never a 'disconnected' claim.
+    requiredScopes: ["data:delete"],
+    // Deliberately "write", not "destructive": the ladder HARD-BLOCKS
+    // `destructive`, which would make this unrunnable. The irreversibility is
+    // handled where it belongs — an explicit confirmation plus a preview that
+    // says so. `email.deleteDraft` set this precedent.
+    riskLevel: "write",
+    confirmationRequired: true,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "taskIds", type: "string[]", required: true, description: "Tasks to delete." },
+    ],
+    examples: ["delete that task", "get rid of the pitch deck task"],
+    userFacingDescription:
+      "I couldn’t delete that task just now — mind trying again in a moment?",
   },
   // --- Documents ---------------------------------------------------------
   {

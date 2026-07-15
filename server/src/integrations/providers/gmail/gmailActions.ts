@@ -3,6 +3,7 @@ import {
   createActionProposal,
   type CreateProposalInput,
 } from "../../../actions/proposals";
+import { CONFIRM_INSTRUCTION } from "../../../actions/confirmationCopy";
 import { executeAction } from "../../../actions/executor";
 import { getUserTimezone } from "../../../reminders/reminders";
 import { logger } from "../../../utils/logger";
@@ -354,7 +355,9 @@ export function formatSendPreview(input: {
     const thread = (input.threadSubject ?? "").trim() || input.subject;
     lines.push(`This is a reply in “${thread}”.`, "");
   }
-  lines.push(`To: ${label}`, `Subject: ${input.subject}`, "", "Body:", input.body, "", "Reply ‘send it’ to continue or ‘cancel’ to stop.");
+  // No longer instructs "cancel": Sendblue treats that word as a carrier opt-out
+  // and blocks the reply the user is waiting for. See `CONFIRM_INSTRUCTION`.
+  lines.push(`To: ${label}`, `Subject: ${input.subject}`, "", "Body:", input.body, "", CONFIRM_INSTRUCTION);
   return lines.join("\n");
 }
 

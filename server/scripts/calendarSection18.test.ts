@@ -421,7 +421,10 @@ check("preview: an update shows exact BEFORE → AFTER values", () => {
   );
   assert.match(preview, /Location: “Cafe” → “the office”/);
   assert.match(preview, /Time: .*1:00\s?PM.* → .*2:00\s?PM/);
-  assert.match(preview, /Want me to go ahead\?$/);
+  // The preview now ends with the shared confirmation instruction. It no longer
+  // offers "cancel" as the stop word: Sendblue reads that as a carrier opt-out and
+  // blocks Hula's reply, which is how a real user was left staring at silence.
+  assert.match(preview, /Want me to go ahead\? Reply Yes to confirm or No to cancel\.$/);
 });
 
 check("preview: a time change on an event WITH guests warns about notifications", () => {

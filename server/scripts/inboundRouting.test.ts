@@ -97,6 +97,8 @@ function inbox(): NormalizedGmailMessage[] {
 function router(over: InboundRouterDeps = {}): InboundRouterDeps {
   const decline = async () => ({ handled: false as const });
   return {
+    transportKeyword: decline,
+    entityFollowup: decline,
     memory: decline,
     reminder: decline,
     confirmation: decline,
@@ -112,6 +114,9 @@ function router(over: InboundRouterDeps = {}): InboundRouterDeps {
     gmailSummary: decline,
     gmailSearch: decline,
     gmailQuestion: decline,
+    todoistUndo: decline,
+    todoistWrite: decline,
+    todoistRead: decline,
     pendingReprompt: decline,
     ...over,
   };
@@ -251,15 +256,29 @@ function modifyContext(userConfirmed?: boolean): ActionPolicyContext {
 check("order: the cascade order is pinned", () => {
   // Order IS the contract — a reorder silently changes which handler wins.
   assert.deepEqual(inboundHandlerOrder(), [
+    // A carrier keyword is addressed to the network, not to Hula. Nothing
+    // downstream can safely interpret one, so nothing downstream sees one.
+    "transportKeyword",
     "memory",
     "reminder",
     "confirmation",
+    // Cross-provider follow-up arbitration. Above every provider handler because
+    // "the second one" means whatever the last grounded list was about — no fixed
+    // handler ORDER can decide that, so the highest handler would otherwise win
+    // every ambiguous pronoun forever.
+    "entityFollowup",
     "gmailClarify",
     "gmailDraftFollowup",
     "gmailDraftLifecycle",
     "gmailCommand",
     // Section 18: after gmailCommand, so Gmail's undo keeps priority.
     "calendarUndo",
+    // Section 19 correction: Todoist PRECEDES Calendar. "add … to my work project
+    // for Friday at 5" was being claimed by calendarWrite, whose extractor reads the
+    // due date as an event. Safety comes from the Todoist gate, not from ordering.
+    "todoistUndo",
+    "todoistWrite",
+    "todoistRead",
     "calendarWrite",
     "gmailWrite",
     "actionIntent",

@@ -70,6 +70,17 @@ const envSchema = z.object({
   GMAIL_OAUTH_REDIRECT_URI: z.string().optional(),
   GMAIL_SCOPES: z.string().optional(),
 
+  // Todoist OAuth (Section 19) — all OPTIONAL. Todoist is its own OAuth app with
+  // its own client id/secret and redirect URI (it does NOT share Google's). All
+  // are required only when a user actually starts the Todoist connect flow; a
+  // missing value surfaces as a safe configuration error at connect time, never a
+  // startup crash. TODOIST_SCOPES overrides the catalog default and is
+  // COMMA-separated, matching Todoist's own contract (not space-separated).
+  TODOIST_OAUTH_CLIENT_ID: z.string().optional(),
+  TODOIST_OAUTH_CLIENT_SECRET: z.string().optional(),
+  TODOIST_OAUTH_REDIRECT_URI: z.string().optional(),
+  TODOIST_SCOPES: z.string().optional(),
+
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),
 });

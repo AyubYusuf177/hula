@@ -1,4 +1,5 @@
 import { getConnectionForUserProvider } from "../../connections";
+import { CONFIRM_INSTRUCTION } from "../../../actions/confirmationCopy";
 import { getUserTimezone } from "../../../reminders/reminders";
 import { wallTimeToUtc } from "../../../reminders/parse";
 import { logger } from "../../../utils/logger";
@@ -426,7 +427,7 @@ export function formatCreatePreview(
       `⚠️ Heads up — you’re already busy ${clock(first.start, tz)}–${clock(first.end, tz)}.`,
     );
   }
-  lines.push("Want me to go ahead?");
+  lines.push(`Want me to go ahead? ${CONFIRM_INSTRUCTION}`);
   return lines.join("\n");
 }
 
@@ -490,7 +491,7 @@ export function formatUpdatePreview(
     // an invite — so the warning has to cover those.
     tail.push("Confirming will email the guests about this change.");
   }
-  tail.push("Want me to go ahead?");
+  tail.push(`Want me to go ahead? ${CONFIRM_INSTRUCTION}`);
   return `I’ll update “${titleOf(event)}”:\n${lines.join("\n")}\n${tail.join("\n")}`;
 }
 

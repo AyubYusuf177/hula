@@ -61,6 +61,39 @@ import {
   type GmailMutationAction,
 } from "../integrations/providers/gmail/gmailVerify";
 import { MimeError, buildGmailRawPayload } from "../integrations/providers/gmail/mime";
+import {
+  TodoistError,
+  isReconnectReason as isTodoistReconnectReason,
+} from "../integrations/providers/todoist/client";
+import {
+  closeTask,
+  createTask,
+  deleteTask,
+  fetchTask,
+  moveTask,
+  reopenTask,
+  updateTask,
+  type TodoistTaskWriteFields,
+} from "../integrations/providers/todoist/tasks";
+import {
+  verifyCompletion,
+  verifyDeletion,
+  verifyReopen,
+  verifyTaskState,
+  type TaskExpectation,
+} from "../integrations/providers/todoist/todoistVerify";
+// Aliased: `calendarContext` exports a `toSelectionItem` too, and the two project
+// different provider objects into different shapes.
+import {
+  recordActedTodoistTask,
+  toSelectionItem as toTodoistSelectionItem,
+} from "../integrations/providers/todoist/todoistContext";
+import { dueLocalStamp } from "../integrations/providers/todoist/todoistFilters";
+import {
+  formatClockTime,
+  formatLocalTime,
+} from "../integrations/providers/todoist/todoistDisplay";
+import type { NormalizedTodoistTask } from "../integrations/providers/todoist/types";
 import { buildActionPolicyContext } from "./context";
 import { evaluateActionForUser, type ActionPolicyContext } from "./policy";
 import { recordActionExecution, type ActionExecutionStatusValue } from "./executions";
@@ -117,6 +150,13 @@ export interface ActionExecutionResult {
      * something that provably happened.
      */
     verifiedThreadIds?: string[];
+    /**
+     * The Todoist tasks whose expected end state was READ BACK and matched
+     * (Section 19). Present only on a verified write, so a caller that remembers
+     * "the task you just completed" can only ever remember something that
+     * provably happened.
+     */
+    taskIds?: string[];
   };
 }
 
@@ -174,7 +214,45 @@ export interface ExecuteActionDeps {
   verifyEventDeleted?: typeof verifyEventDeleted;
   /** Records "the meeting you just created" — ONLY after verification. */
   recordActedCalendarEvent?: typeof recordActedCalendarEvent;
+  /** Todoist provider fns — injected so tests never hit Todoist. */
+  createTodoistTask?: typeof createTask;
+  updateTodoistTask?: typeof updateTask;
+  moveTodoistTask?: typeof moveTask;
+  closeTodoistTask?: typeof closeTask;
+  reopenTodoistTask?: typeof reopenTask;
+  deleteTodoistTask?: typeof deleteTask;
+  /**
+   * The Todoist POSTCONDITION read. Separate from the write fns on purpose: a
+   * write's own response is Todoist's echo of the request, while this asks what
+   * the task actually looks like now.
+   */
+  fetchTodoistTask?: typeof fetchTask;
+  /** Records "the task you just completed" — ONLY after verification. */
+  recordActedTodoistTask?: typeof recordActedTodoistTask;
+  /**
+   * Waits between bounded delete-absence re-reads. Injected so tests exercise the
+   * real backoff logic without spending real time.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** The Todoist write actions the executor backs with a real adapter. */
+type TodoistActionId =
+  | "task.create"
+  | "task.update"
+  | "task.move"
+  | "task.complete"
+  | "task.reopen"
+  | "task.delete";
+
+const TODOIST_ACTION_IDS: ReadonlySet<string> = new Set<TodoistActionId>([
+  "task.create",
+  "task.update",
+  "task.move",
+  "task.complete",
+  "task.reopen",
+  "task.delete",
+]);
 
 /** Generic stub reply for a defined-but-unimplemented action. */
 const GENERIC_STUB =
@@ -303,6 +381,35 @@ export async function executeAction(
           getEvent: deps.getCalendarEvent ?? getCalendarEvent,
           verifyDeleted: deps.verifyEventDeleted ?? verifyEventDeleted,
           recordActed: deps.recordActedCalendarEvent ?? recordActedCalendarEvent,
+        },
+      );
+    }
+
+    // Todoist task lifecycle (Section 19). The structured, ALREADY-RESOLVED task
+    // ids and values arrive in `input` from the Todoist handler (which resolved
+    // and re-fetched the targets) or from a CONFIRMED proposal. The executor
+    // performs the provider write, VERIFIES the postcondition by re-reading, and
+    // confirms strictly from what Todoist actually shows — it never resolves a
+    // task itself, so an ambiguous target can never reach here.
+    if (TODOIST_ACTION_IDS.has(actionId)) {
+      return await runTodoistWrite(
+        userId,
+        actionId as TodoistActionId,
+        input,
+        policy.provider ?? "todoist",
+        {
+          record,
+          proposalId: options.proposalId ?? null,
+          inputKeys,
+          create: deps.createTodoistTask ?? createTask,
+          update: deps.updateTodoistTask ?? updateTask,
+          move: deps.moveTodoistTask ?? moveTask,
+          close: deps.closeTodoistTask ?? closeTask,
+          reopen: deps.reopenTodoistTask ?? reopenTask,
+          remove: deps.deleteTodoistTask ?? deleteTask,
+          getTask: deps.fetchTodoistTask ?? fetchTask,
+          recordActed: deps.recordActedTodoistTask ?? recordActedTodoistTask,
+          sleep: deps.sleep,
         },
       );
     }
@@ -796,6 +903,718 @@ async function runCalendarWrite(
     }
     return await fail(calErr?.reason ?? "execution_failed", userMessage);
   }
+}
+
+/** Honest replies for the Todoist executor (never leak provider detail). */
+export const TODOIST_EXEC_REPLIES = {
+  notConnected: "Your Todoist isn’t connected, so I can’t do that.",
+  reconnect: "I don’t have permission to change your Todoist yet — reconnect it in Hula.",
+  deleteReconnect:
+    "I don’t have permission to delete Todoist tasks yet — reconnect Todoist in Hula and allow deletion.",
+  unavailable: "I couldn’t reach Todoist just now — mind trying again in a bit?",
+  taskGone: "That task isn’t in your Todoist anymore — it may have been deleted already.",
+  missingInfo: "I don’t have enough to do that — I’m missing the task or what to change.",
+  noDueTime: "That task doesn’t have a due date, so there’s no time to take off it.",
+  /**
+   * The DELETE never returned a validated response — a timeout or a dropped
+   * connection. Genuinely uncertain: it may or may not have landed. We do NOT
+   * retry (a destructive write of unknown outcome must never be repeated) and we
+   * do NOT claim either result.
+   */
+  deleteUncertain:
+    "I asked Todoist to delete that, but the connection dropped before it confirmed — so I can’t tell you whether it went through. I haven’t tried again. Mind checking Todoist?",
+  /**
+   * Todoist accepted the change, but reading the task back did NOT show the state
+   * we promised. We do NOT retry: a blind retry of a write that may have partly
+   * landed is how one task becomes two.
+   */
+  unverified:
+    "I asked Todoist to make that change, but when I checked, it hadn’t taken effect. I haven’t tried again — mind taking a look, or asking me once more?",
+} as const;
+
+/** PURE: map a Todoist provider failure to an honest reply. */
+export function todoistReplyForError(
+  err: TodoistError | null,
+  actionId: TodoistActionId,
+): string {
+  if (!err) return TODOIST_EXEC_REPLIES.unavailable;
+  if (err.reason === "not_connected") return TODOIST_EXEC_REPLIES.notConnected;
+  if (err.reason === "insufficient_scope" || isTodoistReconnectReason(err.reason)) {
+    // Name the DELETE permission specifically: a user who connected for read/write
+    // must not be told their whole Todoist access is broken because they declined
+    // the optional delete scope.
+    return actionId === "task.delete"
+      ? TODOIST_EXEC_REPLIES.deleteReconnect
+      : TODOIST_EXEC_REPLIES.reconnect;
+  }
+  if (err.reason === "task_not_found") return TODOIST_EXEC_REPLIES.taskGone;
+  // A DELETE that never got a validated response is genuinely uncertain — it may
+  // have landed. Saying "try again in a bit" would invite a repeat of a
+  // destructive write whose outcome we do not know.
+  if (actionId === "task.delete" && isUncertainOutcome(err.reason)) {
+    return TODOIST_EXEC_REPLIES.deleteUncertain;
+  }
+  return TODOIST_EXEC_REPLIES.unavailable;
+}
+
+/**
+ * PURE: did the request fail WITHOUT a validated provider response?
+ *
+ * These are pre-response transport failures plus a 2xx we could not validate. For
+ * a destructive write they mean "unknown outcome", which is a different thing from
+ * a definitive provider rejection (404/403/429/5xx), where nothing happened.
+ */
+function isUncertainOutcome(reason: TodoistError["reason"]): boolean {
+  return (
+    reason === "todoist_timeout" ||
+    reason === "network_failure" ||
+    reason === "connection_reset" ||
+    reason === "connect_timeout" ||
+    reason === "malformed_provider_response"
+  );
+}
+
+/** PURE: the past-tense verb for a Todoist action, used in replies. */
+function todoistVerb(actionId: TodoistActionId): string {
+  switch (actionId) {
+    case "task.create":
+      return "Added";
+    case "task.update":
+      return "Updated";
+    case "task.move":
+      return "Moved";
+    case "task.complete":
+      return "Completed";
+    case "task.reopen":
+      return "Reopened";
+    case "task.delete":
+      return "Deleted";
+    default:
+      return "Updated";
+  }
+}
+
+/** PURE: read the write fields for a Todoist create/update out of redacted input. */
+function readTodoistFields(input: Record<string, unknown> | undefined): TodoistTaskWriteFields {
+  const fields: TodoistTaskWriteFields = {};
+  const content = readStr(input, "content");
+  const description = readStr(input, "description");
+  const dueDate = readStr(input, "dueDate");
+  const dueDatetime = readStr(input, "dueDatetime");
+  const dueString = readStr(input, "dueString");
+  const priority = readNum(input, "priority");
+  const labels = readStrArray(input, "labels");
+
+  if (content) fields.content = content;
+  if (description) fields.description = description;
+  if (dueDate) fields.dueDate = dueDate;
+  if (dueDatetime) fields.dueDatetime = dueDatetime;
+  if (dueString) fields.dueString = dueString;
+  if (input?.removeDue === true) fields.removeDue = true;
+  if (priority !== null) fields.priority = priority;
+  // An explicitly-supplied EMPTY array means "remove every label" — a real
+  // request. `readStrArray` cannot distinguish that from absent, so the presence
+  // of the key is what decides.
+  if (input && "labels" in input && Array.isArray(input.labels)) fields.labels = labels;
+  return fields;
+}
+
+/** PURE: build the expectation a Todoist write must prove after the fact. */
+export function todoistExpectationFor(
+  actionId: TodoistActionId,
+  input: Record<string, unknown> | undefined,
+): TaskExpectation {
+  const expectation: TaskExpectation = {};
+  if (actionId === "task.complete") return { completed: true };
+  if (actionId === "task.reopen") return { completed: false };
+  if (actionId === "task.move") {
+    const projectId = readStr(input, "projectId");
+    const sectionId = readStr(input, "sectionId");
+    if (projectId) expectation.projectId = projectId;
+    if (sectionId) expectation.sectionId = sectionId;
+    return expectation;
+  }
+
+  const fields = readTodoistFields(input);
+  if (fields.content !== undefined) expectation.content = fields.content;
+  if (fields.description !== undefined) expectation.description = fields.description;
+
+  // The due expectation is stated in the USER'S LOCAL TERMS ("2026-07-17" at
+  // "17:00" in Europe/London), not as the UTC instant we happen to send. Todoist
+  // may store the due as a floating wall time OR as an absolute instant, and the
+  // only thing stable across both — and the only thing the user cares about — is
+  // whether it says 5pm on Friday.
+  const timezone = readStr(input, "timezone") || undefined;
+  const dueLocalDate = readStr(input, "dueLocalDate");
+  const dueLocalTime = readStr(input, "dueLocalTime");
+  if (fields.removeDue) {
+    expectation.dueRemoved = true;
+  } else if (input?.removeDueTime === true) {
+    // The date is asserted by the executor from the task's own current date.
+    expectation.dueTimeRemoved = true;
+    if (dueLocalDate) expectation.dueDate = dueLocalDate;
+    expectation.dueTimezone = timezone;
+  } else if (dueLocalDate) {
+    expectation.dueDate = dueLocalDate;
+    if (dueLocalTime) expectation.dueTime = dueLocalTime;
+    expectation.dueTimezone = timezone;
+  }
+  if (fields.priority !== undefined) expectation.priority = fields.priority;
+  if (fields.labels !== undefined) expectation.labels = fields.labels;
+  // A recurring `dueString` is deliberately NOT asserted: Todoist parses it
+  // server-side into a date we did not compute, so we cannot state in advance what
+  // it will become. Claiming an expectation we cannot derive would produce a false
+  // mismatch on a perfectly good write.
+  if (actionId === "task.create" && expectation.completed === undefined) {
+    expectation.completed = false;
+  }
+  return expectation;
+}
+
+/**
+ * Execute a Todoist task write from ALREADY-RESOLVED structured input (Section 19).
+ *
+ * ONE function for the whole lifecycle because every Todoist write shares the same
+ * shape: resolve → write → RE-READ → verify → report. The uniformity is the point;
+ * a per-action copy of this loop is where partial-failure honesty rots.
+ *
+ * The rules it enforces, all of which the section names explicitly:
+ *  - Success is claimed ONLY from a verified re-read, never from a 2xx. Todoist
+ *    answers 204 to close/reopen/delete with NO body, so the provider's acceptance
+ *    carries no information about the outcome at all.
+ *  - PARTIAL bulk failure is reported as partial. "Completed 2 of 3" is the truth;
+ *    rounding it to "Completed 3" is the exact lie Phase 9 forbids.
+ *  - Nothing is retried. An ambiguous write retried is how duplicates happen.
+ *  - `recordActed` runs ONLY over the VERIFIED set, so "undo that" can never
+ *    reverse something that did not happen.
+ *
+ * Never throws.
+ */
+async function runTodoistWrite(
+  userId: string,
+  actionId: TodoistActionId,
+  input: Record<string, unknown> | undefined,
+  provider: string,
+  ctx: {
+    record: typeof recordActionExecution;
+    proposalId: string | null;
+    inputKeys: string[];
+    create: typeof createTask;
+    update: typeof updateTask;
+    move: typeof moveTask;
+    close: typeof closeTask;
+    reopen: typeof reopenTask;
+    remove: typeof deleteTask;
+    getTask: typeof fetchTask;
+    recordActed: typeof recordActedTodoistTask;
+    /** Waits between bounded delete-absence re-reads (injected in tests). */
+    sleep?: (ms: number) => Promise<void>;
+  },
+): Promise<ActionExecutionResult> {
+  const taskIds = readStrArray(input, "taskIds");
+
+  const fail = async (
+    errorMessage: string,
+    userMessage: string,
+  ): Promise<ActionExecutionResult> => {
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { inputKeys: ctx.inputKeys, taskCount: taskIds.length },
+      errorMessage,
+    });
+    return { ok: false, status: "failed", actionId, provider, userMessage, executionId };
+  };
+
+  // --- CREATE: a single task, verified into existence --------------------
+  if (actionId === "task.create") {
+    const fields = readTodoistFields(input);
+    if (!fields.content) return await fail("invalid_input", TODOIST_EXEC_REPLIES.missingInfo);
+    const projectId = readStr(input, "projectId");
+    const sectionId = readStr(input, "sectionId");
+    if (projectId) fields.projectId = projectId;
+    if (sectionId) fields.sectionId = sectionId;
+
+    try {
+      // The requestId is generated at proposal time and REPLAYED, so a duplicate
+      // delivery reuses Todoist's de-duplication rather than creating a twin.
+      const created = await ctx.create(userId, fields, {
+        requestId: readStr(input, "requestId") || undefined,
+      });
+
+      const createExpectation = todoistExpectationFor(actionId, input);
+      const { observed, verification } = await verifyTodoistWrite(
+        userId,
+        created,
+        createExpectation,
+        ctx.getTask,
+      );
+      if (verification && !verification.ok) {
+        return await reportTodoistPartial(
+          userId,
+          actionId,
+          provider,
+          observed,
+          verification,
+          ctx,
+          createExpectation,
+        );
+      }
+
+      const executionId = await ctx.record(userId, {
+        proposalId: ctx.proposalId,
+        provider,
+        actionId,
+        status: "succeeded",
+        requestSummary: {
+          hasDue: Boolean(fields.dueDate || fields.dueDatetime || fields.dueString),
+          hasProject: Boolean(projectId),
+          labelCount: fields.labels?.length ?? 0,
+        },
+        // Ledger keeps only the Todoist-issued id — never the title.
+        resultSummary: { taskId: created.id, verified: verification?.ok ?? false },
+      });
+
+      await rememberTodoistActed(userId, observed, "created", ctx);
+      return {
+        ok: true,
+        status: "succeeded",
+        actionId,
+        provider,
+        userMessage: `Added “${observed.content}”.`,
+        executionId,
+        receipt: { taskIds: [created.id] },
+      };
+    } catch (err) {
+      const todoistErr = err instanceof TodoistError ? err : null;
+      logger.error("action.todoistWrite failed", {
+        actionId,
+        errorCode: todoistErr?.reason ?? "unknown",
+        httpStatus: todoistErr?.httpStatus ?? null,
+      });
+      return await fail(
+        todoistErr?.reason ?? "execution_failed",
+        todoistReplyForError(todoistErr, actionId),
+      );
+    }
+  }
+
+  // --- EVERYTHING ELSE: 1..N tasks, each verified individually -----------
+  if (taskIds.length === 0) return await fail("invalid_input", TODOIST_EXEC_REPLIES.missingInfo);
+
+  const expectation = todoistExpectationFor(actionId, input);
+  const verified: string[] = [];
+  const verifiedTasks: NormalizedTodoistTask[] = [];
+  let rolledForward = 0;
+  let firstError: TodoistError | null = null;
+
+  for (const taskId of taskIds) {
+    try {
+      // Re-fetch BEFORE the write. The context may be up to 30 minutes old, and
+      // this is also what tells us whether the task is recurring — which changes
+      // what a successful completion even looks like.
+      let before: NormalizedTodoistTask | null = null;
+      try {
+        before = await ctx.getTask(userId, taskId);
+      } catch (err) {
+        if (err instanceof TodoistError && err.reason === "task_not_found") {
+          // Already gone. For a delete that IS the requested end state.
+          if (actionId === "task.delete") {
+            verified.push(taskId);
+            continue;
+          }
+        }
+        throw err;
+      }
+
+      if (actionId === "task.update") {
+        const fields = readTodoistFields(input);
+        if (input?.removeDueTime === true) {
+          // "Take the time off that, keep the day." Todoist has no 'clear the
+          // time' flag — sending a date-only `due_date` IS how the time is
+          // dropped. The date comes from the task's OWN freshly-read due date, so
+          // a stale context can never silently move the day while removing a time.
+          const currentKey = dueLocalStamp(
+            before?.due ?? null,
+            readStr(input, "timezone") || undefined,
+          )?.dateKey;
+          if (!currentKey) {
+            return await fail("invalid_input", TODOIST_EXEC_REPLIES.noDueTime);
+          }
+          fields.dueDate = currentKey;
+          delete fields.dueDatetime;
+          delete fields.dueString;
+        }
+        await ctx.update(userId, taskId, fields);
+      } else if (actionId === "task.move") {
+        await ctx.move(userId, taskId, {
+          projectId: readStr(input, "projectId") || undefined,
+          sectionId: readStr(input, "sectionId") || undefined,
+        });
+      } else if (actionId === "task.complete") {
+        await ctx.close(userId, taskId);
+      } else if (actionId === "task.reopen") {
+        await ctx.reopen(userId, taskId);
+      } else {
+        // DELETE. Executed EXACTLY ONCE and never retried — a destructive write
+        // whose outcome is unknown must never be repeated.
+        //
+        // `ctx.remove` returns only on a DOCUMENTED success status (see
+        // `deleteTask`); anything else throws and is handled by the catch below.
+        // That validated receipt is AUTHORITATIVE: Todoist has told us the task is
+        // gone, and no subsequent read can make that untrue.
+        const receipt = await ctx.remove(userId, taskId);
+        // The read-back can only ever CONFIRM — never falsify. See
+        // `confirmTodoistDeletion`.
+        const confirmation = await confirmTodoistDeletion(userId, taskId, ctx.getTask, ctx.sleep);
+        logger.info("action.todoistDelete", {
+          httpStatus: receipt.httpStatus,
+          confirmation,
+        });
+        verified.push(taskId);
+        verifiedTasks.push(before);
+        continue;
+      }
+
+      // PROVE it. Todoist's acceptance is not the outcome; the task's real state
+      // is. This read-back is the whole point of the loop.
+      let after: NormalizedTodoistTask | null = null;
+      let found = true;
+      try {
+        after = await ctx.getTask(userId, taskId);
+      } catch (err) {
+        if (err instanceof TodoistError && err.reason === "task_not_found") found = false;
+        else throw err;
+      }
+
+      let ok: boolean;
+      if (actionId === "task.complete") {
+        const result = verifyCompletion({
+          found,
+          task: after,
+          wasRecurring: before?.due?.isRecurring ?? false,
+        });
+        ok = result.ok;
+        if (result.rolledForward) rolledForward += 1;
+      } else if (actionId === "task.reopen") {
+        ok = verifyReopen(after);
+      } else {
+        ok = verifyTaskState(after, expectation).ok;
+      }
+
+      if (ok) {
+        verified.push(taskId);
+        verifiedTasks.push(after ?? before);
+      }
+    } catch (err) {
+      const todoistErr = err instanceof TodoistError ? err : null;
+      if (!firstError && todoistErr) firstError = todoistErr;
+      logger.error("action.todoistWrite failed", {
+        actionId,
+        errorCode: todoistErr?.reason ?? "unknown",
+        httpStatus: todoistErr?.httpStatus ?? null,
+      });
+      // A dead grant / missing scope applies to EVERY task — stop rather than
+      // hammer Todoist with calls that will all fail identically.
+      if (
+        todoistErr &&
+        (todoistErr.reason === "not_connected" ||
+          todoistErr.reason === "insufficient_scope" ||
+          isTodoistReconnectReason(todoistErr.reason))
+      ) {
+        break;
+      }
+    }
+  }
+
+  if (verified.length === 0) {
+    const userMessage = firstError
+      ? todoistReplyForError(firstError, actionId)
+      : TODOIST_EXEC_REPLIES.unverified;
+    return await fail(firstError?.reason ?? "postcondition_unverified", userMessage);
+  }
+
+  const failedCount = taskIds.length - verified.length;
+  const executionId = await ctx.record(userId, {
+    proposalId: ctx.proposalId,
+    provider,
+    actionId,
+    status: failedCount > 0 ? "failed" : "succeeded",
+    requestSummary: { taskCount: taskIds.length, changedKeys: ctx.inputKeys },
+    // Ledger keeps counts + Todoist ids only — never task titles.
+    resultSummary: { verified: verified.length, unverified: failedCount },
+    errorMessage: failedCount > 0 ? "postcondition_unverified" : null,
+  });
+
+  // Remember ONLY the verified set, so "undo that" can never reverse a task the
+  // write did not actually change.
+  const actedKind =
+    actionId === "task.complete"
+      ? "completed"
+      : actionId === "task.reopen"
+        ? "reopened"
+        : actionId === "task.delete"
+          ? "deleted"
+          : actionId === "task.move"
+            ? "moved"
+            : "updated";
+  if (verifiedTasks[0]) {
+    await rememberTodoistActed(userId, verifiedTasks[0], actedKind, ctx, verified);
+  }
+
+  return {
+    ok: failedCount === 0,
+    status: failedCount > 0 ? "failed" : "succeeded",
+    actionId,
+    provider,
+    userMessage: formatTodoistOutcome({
+      actionId,
+      verified: verified.length,
+      total: taskIds.length,
+      label: verifiedTasks[0]?.content ?? readStr(input, "label"),
+      rolledForward,
+    }),
+    executionId,
+    receipt: { taskIds: verified },
+  };
+}
+
+/**
+ * PURE: the user-facing outcome line.
+ *
+ * Partial success is reported as partial — never rounded up to "done". The
+ * singular case names the task, because "Completed “Call Rob”" is far more useful
+ * as a confirmation than "Completed 1 task".
+ */
+export function formatTodoistOutcome(input: {
+  actionId: TodoistActionId;
+  verified: number;
+  total: number;
+  label?: string | null;
+  rolledForward?: number;
+}): string {
+  const verb = todoistVerb(input.actionId);
+  const failed = input.total - input.verified;
+
+  if (failed > 0) {
+    const noun = input.total === 2 ? "task" : "tasks";
+    const tail =
+      failed === 1 ? "one didn’t go through." : `${failed} didn’t go through.`;
+    return `${verb} ${input.verified} of ${input.total} ${noun} — ${tail}`;
+  }
+
+  if (input.verified === 1) {
+    const base = input.label ? `${verb} “${input.label}”.` : `${verb} the task.`;
+    // A recurring task that rolled forward is a genuinely different outcome and
+    // saying so prevents the "why is it still there?" confusion.
+    if (input.rolledForward && input.actionId === "task.complete") {
+      return `${base} It repeats, so it’s already back for its next date.`;
+    }
+    return base;
+  }
+
+  const base = `${verb} ${input.verified} tasks.`;
+  if (input.rolledForward && input.actionId === "task.complete") {
+    const n = input.rolledForward;
+    return `${base} ${n === 1 ? "One repeats, so it’s" : `${n} repeat, so they’re`} already back for the next date.`;
+  }
+  return base;
+}
+
+/**
+ * How many times a delete's absence check may be re-read, and how long to wait
+ * between attempts.
+ *
+ * Small and bounded on purpose: this runs inside an iMessage round-trip, so it
+ * must not add perceptible latency. Two short waits are enough to ride out the
+ * read-after-write lag that produced the live false failure, and the whole thing
+ * is best-effort anyway — the receipt already settled the outcome.
+ */
+export const DELETE_CONFIRM_ATTEMPTS = 3;
+export const DELETE_CONFIRM_BACKOFF_MS = [0, 250, 750];
+
+/** What a bounded absence check managed to observe. Never changes the outcome. */
+export type DeleteConfirmation = "absent" | "still_visible" | "unknown";
+
+/** Default sleep. Injected in tests so no suite ever actually waits. */
+const realSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Ask whether a deleted task is actually gone — WITHOUT the power to contradict a
+ * validated delete receipt.
+ *
+ * THE BUG THIS REPLACES. The old code did ONE immediate read and treated a task
+ * still being visible as proof the delete had failed. On a real device Todoist
+ * accepted the DELETE, answered a documented success, and then — 6 seconds later,
+ * within the same reply — still returned the task from `GET /tasks/{id}`. Hula
+ * told the user the change "hadn't taken effect". Four minutes later the task was
+ * demonstrably gone. The deletion had worked all along; the verifier was reading
+ * a stale replica and calling it a failure.
+ *
+ * A distributed store is allowed to lag a write. A validated DELETE receipt is
+ * Todoist telling us the task is gone; a stale read is Todoist not having caught
+ * up with itself yet. Between those two, the receipt is the authority — so this
+ * function returns an OBSERVATION for the log, never a verdict:
+ *
+ *   - `absent`        the read confirms it (the common case, usually first try);
+ *   - `still_visible` every bounded read was stale — the receipt still stands;
+ *   - `unknown`       the check itself failed (transport). Proves nothing either way.
+ *
+ * It re-reads ONLY. The DELETE is never repeated, whatever this observes.
+ */
+export async function confirmTodoistDeletion(
+  userId: string,
+  taskId: string,
+  getTask: typeof fetchTask,
+  sleep: (ms: number) => Promise<void> = realSleep,
+): Promise<DeleteConfirmation> {
+  for (let attempt = 0; attempt < DELETE_CONFIRM_ATTEMPTS; attempt += 1) {
+    const wait = DELETE_CONFIRM_BACKOFF_MS[attempt] ?? 0;
+    if (wait > 0) await sleep(wait);
+    try {
+      await getTask(userId, taskId);
+      // Still visible — a stale replica. Try again within the bound.
+    } catch (err) {
+      // A definitive not-found is the confirmation we were hoping for.
+      if (err instanceof TodoistError && err.reason === "task_not_found") return "absent";
+      // The CHECK failed (network). That says nothing about the delete, which
+      // already succeeded. Stop — retrying a broken read helps no one.
+      return "unknown";
+    }
+  }
+  return "still_visible";
+}
+
+/**
+ * Re-read the task and check it against what the write promised (Section 19).
+ *
+ * The re-fetch is BEST-EFFORT on transport failure but AUTHORITATIVE on mismatch —
+ * the same asymmetry the Calendar path uses, for the same reason. A failed
+ * re-read (network) leaves the write's own validated receipt — a real
+ * Todoist-issued id — as genuine evidence; refusing to report a real success
+ * because a second call flaked would lie in the other direction. A re-read that
+ * SUCCEEDS and disagrees wins unconditionally.
+ */
+async function verifyTodoistWrite(
+  userId: string,
+  written: NormalizedTodoistTask,
+  expectation: TaskExpectation,
+  getTask: typeof fetchTask,
+): Promise<{
+  observed: NormalizedTodoistTask;
+  verification: ReturnType<typeof verifyTaskState> | null;
+}> {
+  try {
+    const fresh = await getTask(userId, written.id);
+    return { observed: fresh, verification: verifyTaskState(fresh, expectation) };
+  } catch {
+    return { observed: written, verification: null };
+  }
+}
+
+/**
+ * Remember a task a write VERIFIABLY landed on. Best-effort: losing this costs the
+ * pronoun shortcut, never the action.
+ */
+async function rememberTodoistActed(
+  userId: string,
+  task: NormalizedTodoistTask,
+  kind: "created" | "updated" | "completed" | "reopened" | "deleted" | "moved",
+  ctx: { recordActed: typeof recordActedTodoistTask },
+  bulkIds?: string[],
+): Promise<void> {
+  try {
+    await ctx.recordActed(userId, {
+      task: toTodoistSelectionItem(task),
+      kind,
+      at: new Date().toISOString(),
+      ...(bulkIds && bulkIds.length > 1 ? { bulkIds } : {}),
+    });
+  } catch {
+    // Non-fatal by design.
+  }
+}
+
+/**
+ * Report a Todoist write whose postcondition did NOT match (Section 19).
+ *
+ * The anti-fabrication path: the write reached Todoist and Todoist answered 2xx,
+ * but the task does not say what we were about to claim. Hula reports what it
+ * OBSERVED, names the gap, and records the execution as `failed` so the ledger
+ * does not show a success that isn't one. It does NOT retry.
+ */
+async function reportTodoistPartial(
+  userId: string,
+  actionId: TodoistActionId,
+  provider: string,
+  observed: NormalizedTodoistTask,
+  verification: ReturnType<typeof verifyTaskState>,
+  ctx: { record: typeof recordActionExecution; proposalId: string | null; inputKeys: string[] },
+  expectation: TaskExpectation = {},
+): Promise<ActionExecutionResult> {
+  const timezone = expectation.dueTimezone;
+  const executionId = await ctx.record(userId, {
+    proposalId: ctx.proposalId,
+    provider,
+    actionId,
+    status: "failed",
+    requestSummary: { inputKeys: ctx.inputKeys },
+    resultSummary: { taskId: observed.id, mismatches: verification.mismatches },
+    errorMessage: "postcondition_mismatch",
+  });
+
+  const notes: string[] = [];
+  // Name the field that ACTUALLY failed. Reporting "the due date didn't stick" for
+  // a task whose date saved perfectly and only lost its TIME told a real user their
+  // date was wrong when it was right — and sent them looking for the wrong problem.
+  const observedStamp = dueLocalStamp(observed.due, timezone);
+  const onlyTimeFailed =
+    verification.mismatches.length === 1 && verification.mismatches[0] === "due_time";
+
+  if (verification.mismatches.includes("due")) notes.push("The due date didn’t stick.");
+  // Skipped when it is the whole story — the headline below already says it.
+  if (verification.mismatches.includes("due_time") && !onlyTimeFailed) {
+    notes.push(
+      observedStamp?.time
+        ? `It saved as ${formatLocalTime(observedStamp.time)} rather than the time I described.`
+        : "The due time didn’t save — it’s showing as an all-day task.",
+    );
+  }
+  if (verification.mismatches.includes("priority")) notes.push("The priority didn’t stick.");
+  if (verification.mismatches.includes("project")) notes.push("It didn’t move project.");
+  if (verification.mismatches.includes("section")) notes.push("It didn’t move section.");
+  if (verification.mismatches.includes("labels")) notes.push("The labels didn’t stick.");
+  if (verification.mismatches.includes("content")) notes.push("The title didn’t stick.");
+  if (verification.mismatches.includes("description")) notes.push("The description didn’t stick.");
+  notes.push("Have a look in Todoist and I can fix it from there.");
+
+  // When the ONLY thing that failed is the due TIME, say precisely that. The
+  // generic "it didn't come out exactly as I described" is accurate but useless
+  // here — the user needs to know the task and its date are fine and only the time
+  // is wrong, which is a much smaller thing to fix.
+  //
+  // MISSING and WRONG are separated because they are different facts: a time that
+  // saved as 7pm WAS saved, so "wasn't saved" would be its own small lie.
+  const verb = actionId === "task.create" ? "created" : "updated";
+  let headline = `I saved “${observed.content}”, but it didn’t come out exactly as I described.`;
+  if (onlyTimeFailed && expectation.dueTime) {
+    headline = observedStamp?.time
+      ? `I ${verb} the task, but it saved as ${formatLocalTime(observedStamp.time)} rather than the ${formatClockTime(expectation.dueTime)} I asked for.`
+      : `I ${verb} the task, but its ${formatClockTime(expectation.dueTime)} due time wasn’t saved.`;
+  }
+
+  return {
+    ok: false,
+    status: "failed",
+    actionId,
+    provider,
+    userMessage: [headline, ...notes].join(" "),
+    executionId,
+    receipt: { taskIds: [observed.id] },
+  };
 }
 
 /**

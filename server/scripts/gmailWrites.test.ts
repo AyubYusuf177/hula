@@ -416,7 +416,10 @@ check("preview: send preview shows To, Subject, and the FULL body", () => {
   assert.ok(/^To: Rob <rob@example\.com>$/m.test(preview));
   assert.ok(/^Subject: Lunch$/m.test(preview));
   assert.ok(preview.includes(body), "full body shown, not summarized");
-  assert.ok(/Reply ‘send it’ to continue or ‘cancel’ to stop\./.test(preview));
+  // No longer instructs "cancel" — Sendblue treats the standalone word as a carrier
+  // opt-out and blocks the reply the user is waiting on. See `CONFIRM_INSTRUCTION`.
+  assert.ok(/Reply Yes to confirm or No to cancel\./.test(preview));
+  assert.ok(!/‘cancel’ to stop/.test(preview), "must not offer the opt-out word");
 });
 
 check("preview: reply preview identifies the thread", () => {

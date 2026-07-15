@@ -1,0 +1,105 @@
+import { handleTodoistWrite } from "../integrations/providers/todoist/todoistActions";
+import { logger } from "../utils/logger";
+import {
+  isDestructiveFollowup,
+  resolveFollowupOwner,
+  type ArbiterDeps,
+  type FollowupOwner,
+} from "../actions/entityContextArbiter";
+
+/**
+ * Cross-provider follow-up arbitration, as one cascade step.
+ *
+ * Placed ABOVE the Gmail handlers so a follow-up whose context is a Todoist list
+ * ("change the second one's priority") reaches Todoist instead of being swallowed
+ * by Gmail's draft-edit gate — the exact real-device failure.
+ *
+ * WHY IT ONLY CLAIMS FOR TODOIST. This is a targeted, reversible intervention, not
+ * a re-architecture of a cascade that works. When the arbiter says Gmail or
+ * Calendar owns the follow-up, this DECLINES and the existing, tested order runs
+ * exactly as it does today — those handlers already sit first and already resolve
+ * their own contexts correctly. The only ordering that was actually wrong was
+ * Gmail-above-Todoist for a Todoist follow-up, so that is the only thing changed.
+ *
+ * A CONFLICT is answered here rather than delegated, because by definition no
+ * single provider should act on it.
+ *
+ * The symmetric protection — Todoist grabbing a follow-up that Gmail or Calendar
+ * owns — lives in `handleTodoistWrite`, which consults the SAME arbiter before
+ * claiming a bare pronoun. Both directions therefore agree by construction.
+ */
+
+export interface HandlerResult {
+  handled: boolean;
+  reply?: string;
+}
+
+export interface EntityFollowupDeps extends ArbiterDeps {
+  resolveOwner?: typeof resolveFollowupOwner;
+  todoistWrite?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+}
+
+/**
+ * What Hula says when a DESTRUCTIVE pronoun-only follow-up has no owner.
+ *
+ * Failing closed matters here more than anywhere else. "Delete it" with no live
+ * context previously fell through every handler to the general brain, which is
+ * free to answer "Deleted!" for something that still exists — the exact class of
+ * fabrication this system is built to prevent. Asking is the only honest reply,
+ * and it mutates nothing.
+ */
+export const DESTRUCTIVE_NO_CONTEXT_REPLY =
+  "I’m not sure what you’d like me to delete — could you tell me which one you mean?";
+
+/**
+ * Route a bare ordinal/pronoun follow-up to whoever the conversation is about.
+ *
+ * Returns `{handled:false}` for anything that is not a follow-up, or that another
+ * provider owns, so ordinary messages and every existing Gmail/Calendar path are
+ * completely unaffected. Never throws: an arbitration failure degrades to the
+ * normal cascade rather than blocking the reply.
+ */
+export async function handleEntityFollowup(
+  userId: string,
+  text: string | undefined,
+  deps: EntityFollowupDeps = {},
+): Promise<HandlerResult> {
+  const resolve = deps.resolveOwner ?? resolveFollowupOwner;
+
+  let owner: FollowupOwner;
+  try {
+    owner = await resolve(userId, text, deps);
+  } catch (err) {
+    logger.error("entityFollowup arbitration failed", {
+      reason: err instanceof Error ? err.message : "unknown error",
+    });
+    return { handled: false };
+  }
+
+  if (owner.kind === "none") {
+    // Nothing owns it. Harmless for most follow-ups — the cascade carries on — but
+    // a DESTRUCTIVE one must never be guessed at, or handed to the brain.
+    if (isDestructiveFollowup(text)) {
+      logger.info("entityFollowup destructive with no context");
+      return { handled: true, reply: DESTRUCTIVE_NO_CONTEXT_REPLY };
+    }
+    return { handled: false };
+  }
+
+  if (owner.kind === "conflict") {
+    // Two different entities named in one message. Acting on either could mutate
+    // the wrong provider, so Hula asks — and mutates nothing.
+    logger.info("entityFollowup conflict", { source: "arbiter" });
+    return { handled: true, reply: owner.clarification };
+  }
+
+  if (owner.owner !== "todoist_task") {
+    // Gmail/Calendar own it — leave the tested cascade to do exactly what it
+    // already does.
+    return { handled: false };
+  }
+
+  logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+  const todoistWrite = deps.todoistWrite ?? ((u, t) => handleTodoistWrite(u, t, { arbitrated: true }));
+  return todoistWrite(userId, text);
+}

@@ -117,6 +117,50 @@ export function isCalendarEventDelete(text: string): boolean {
   return CALENDAR_EVENT_CONTEXT_RE.test(trimmed) || CALENDAR_DATETIME_CUE_RE.test(trimmed);
 }
 
+/**
+ * A forget target that is nothing but a PRONOUN ("it", "that", "this one", "them").
+ *
+ * Optional leading article/possessive so "delete that one" and "remove the last one"
+ * are covered, but any real noun ("my address", "the memory about X") is not.
+ */
+const PRONOUN_ONLY_TARGET_RE =
+  /^(?:the\s+|that\s+|this\s+|my\s+)?(?:it|that|this|them|those|these|they|one|last\s+one|first\s+one|second\s+one)$/i;
+
+/**
+ * PURE: does a forget/delete/remove name NO memory at all — only a pronoun?
+ *
+ * THE ARCHITECTURAL POINT. `FORGET_MATCH_RE` matches ANY message starting with
+ * forget/delete/remove and treats the remainder as a search string. For "delete it"
+ * that remainder is the literal word "it", so memory searched for a memory whose
+ * text contains "it", found none, and answered "I couldn't find a saved memory
+ * matching that" — while the user was looking at a Todoist task list and plainly
+ * meant the task.
+ *
+ * A bare pronoun does not NAME a memory; it names whatever the conversation is
+ * currently about, which memory has no way to know. Memory therefore declines and
+ * lets the shared cross-provider arbiter decide (see `entityContextArbiter`), which
+ * resolves it against the newest grounded context.
+ *
+ * This GENERALISES the `isCalendarEventDelete` guard above. That was the same bug
+ * (memory swallowing another provider's delete) patched provider-by-provider with
+ * calendar vocabulary; a third provider would have needed a third patch. The real
+ * rule is simpler and provider-agnostic: *memory only claims a deletion that
+ * actually names something.*
+ *
+ * An explicit "memory"/"memories" ALWAYS stays a memory command ("delete that
+ * memory"), so a user who says what they mean is never overruled.
+ */
+export function isPronounOnlyForgetTarget(text: string): boolean {
+  const trimmed = (text ?? "").trim();
+  const match = FORGET_MATCH_RE.exec(trimmed);
+  if (!match) return false;
+  if (EXPLICIT_MEMORY_RE.test(trimmed)) return false;
+  const target = cleanForgetQuery(match[1] ?? "");
+  // No target at all ("delete") is equally unnamed.
+  if (!target) return true;
+  return PRONOUN_ONLY_TARGET_RE.test(target);
+}
+
 // List phrasing.
 const LIST_RES = [
   /what do you remember/i,
@@ -158,6 +202,11 @@ export function classifyMemoryCommand(text: string | undefined): MemoryCommand {
   // "remove the Project Planning event from my calendar") is NOT a saved-memory
   // command — leave it for the Section 15 Calendar-write handler downstream.
   if (isCalendarEventDelete(trimmed)) return { intent: "none" };
+
+  // A delete/remove/forget that names only a PRONOUN ("delete it") names no memory.
+  // Decline so the cross-provider arbiter can resolve it against whatever the user
+  // is actually looking at. See `isPronounOnlyForgetTarget`.
+  if (isPronounOnlyForgetTarget(trimmed)) return { intent: "none" };
 
   // Forget everything.
   if (FORGET_ALL_RE.test(trimmed) || CLEAR_MEMORY_RE.test(trimmed)) {

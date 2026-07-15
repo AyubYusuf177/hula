@@ -29,16 +29,18 @@ import {
 import {
   connectGmail,
   connectGoogleCalendar,
+  connectTodoist,
   disconnectGmail,
   disconnectGoogleCalendar,
+  disconnectTodoist,
   fetchUserIntegrations,
   GMAIL_PROVIDER,
   GmailNotConfiguredError,
   GOOGLE_CALENDAR_PROVIDER,
   GoogleCalendarNotConfiguredError,
   MissingApiUrlError,
-  type GmailConnectResponse,
-  type GoogleCalendarConnectResponse,
+  TODOIST_PROVIDER,
+  TodoistNotConfiguredError,
   type IntegrationStatus,
 } from '@/lib/hulaApi';
 import {
@@ -61,6 +63,37 @@ const font = hula.typography.fontFamily;
 
 /** Provider ids the screen renders (drives which statuses we care about). */
 const PROVIDER_IDS = new Set(INTEGRATION_PROVIDERS.map((p) => p.id));
+
+/**
+ * Which providers can actually START an OAuth flow, and how.
+ *
+ * A table rather than a chain of `if (providerId === ...)`: connect and disconnect
+ * were each their own branch, so every new provider meant editing several places,
+ * and a provider present in the catalog but missing from ONE of them would render
+ * a card that fails on tap or silently no-ops on disconnect. Membership here is the
+ * single source of truth for "this integration is really connectable" — a provider
+ * with no connect route can never present as available.
+ */
+type ConnectStarter = (
+  token: string,
+  returnUrl: string,
+) => Promise<{ authorizationUrl: string }>;
+
+const CONNECT_STARTERS: Record<string, ConnectStarter | undefined> = {
+  [GOOGLE_CALENDAR_PROVIDER]: (token, appReturnUrl) =>
+    connectGoogleCalendar(token, { appReturnUrl }),
+  [GMAIL_PROVIDER]: (token, appReturnUrl) => connectGmail(token, { appReturnUrl }),
+  [TODOIST_PROVIDER]: (token, appReturnUrl) => connectTodoist(token, { appReturnUrl }),
+};
+
+const DISCONNECTERS: Record<
+  string,
+  ((token: string) => Promise<{ ok: boolean; changed: boolean }>) | undefined
+> = {
+  [GOOGLE_CALENDAR_PROVIDER]: disconnectGoogleCalendar,
+  [GMAIL_PROVIDER]: disconnectGmail,
+  [TODOIST_PROVIDER]: disconnectTodoist,
+};
 
 type StatusMap = Record<string, IntegrationStatus | null>;
 
@@ -230,22 +263,18 @@ export default function IntegrationsScreen() {
       const token = await getTokenRef.current();
       if (!token) throw new Error('Not signed in');
 
-      // Google Calendar and Gmail each have their own real OAuth flow.
-      if (
-        providerId !== GOOGLE_CALENDAR_PROVIDER &&
-        providerId !== GMAIL_PROVIDER
-      ) {
+      // Each live provider has its own real OAuth flow. A provider absent from
+      // this table has no connect route yet and must never present as available.
+      const starter = CONNECT_STARTERS[providerId];
+      if (!starter) {
         throw new Error('This integration isn’t available yet.');
       }
 
       // A deep link back into this screen so the backend callback can bounce the
-      // user straight home. Google still redirects to the backend callback first.
+      // user straight home. The provider still redirects to the backend callback
+      // first.
       const returnUrl = Linking.createURL('/integrations');
-      const connectResult: GoogleCalendarConnectResponse | GmailConnectResponse =
-        providerId === GMAIL_PROVIDER
-          ? await connectGmail(token, { appReturnUrl: returnUrl })
-          : await connectGoogleCalendar(token, { appReturnUrl: returnUrl });
-      const { authorizationUrl } = connectResult;
+      const { authorizationUrl } = await starter(token, returnUrl);
 
       // Prefer the auth session (auto-dismisses on the return-URL scheme); fall
       // back to a plain system-browser open if it isn't available. Never a WebView.
@@ -258,7 +287,8 @@ export default function IntegrationsScreen() {
       if (__DEV__) console.warn('[Integrations] connect failed:', err);
       const message =
         err instanceof GoogleCalendarNotConfiguredError ||
-        err instanceof GmailNotConfiguredError
+        err instanceof GmailNotConfiguredError ||
+        err instanceof TodoistNotConfiguredError
           ? 'This connection isn’t available yet. Please try again later.'
           : err instanceof MissingApiUrlError
             ? 'Hula backend URL is not configured.'
@@ -278,11 +308,7 @@ export default function IntegrationsScreen() {
     try {
       const token = await getTokenRef.current();
       if (!token) throw new Error('Not signed in');
-      if (providerId === GOOGLE_CALENDAR_PROVIDER) {
-        await disconnectGoogleCalendar(token);
-      } else if (providerId === GMAIL_PROVIDER) {
-        await disconnectGmail(token);
-      }
+      await DISCONNECTERS[providerId]?.(token);
       // Optimistically flip ONLY this provider in state + cache so the change is
       // instant; the refresh below still confirms backend truth. Other providers
       // are left untouched.
