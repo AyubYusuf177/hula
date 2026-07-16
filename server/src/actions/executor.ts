@@ -105,6 +105,8 @@ import { evaluateActionForUser, type ActionPolicyContext } from "./policy";
 import { recordActionExecution, type ActionExecutionStatusValue } from "./executions";
 import { getActionDefinition } from "./registry";
 import type { NormalizedCalendarEvent } from "../integrations/providers/googleCalendar/types";
+import { notionOps } from "../integrations/providers/notion/operations";
+import { recordNotionEntity } from "../integrations/providers/notion/context";
 
 /**
  * Action executor (Section 12).
@@ -249,6 +251,15 @@ export interface ExecuteActionDeps {
   recordAsanaEntity?: typeof recordAsanaEntity;
   createAsanaResource?: typeof createAsanaResource;
   updateAsanaResource?: typeof updateAsanaResource;
+  updateNotionPage?: typeof notionOps.updatePage;
+  moveNotionPage?: typeof notionOps.movePage;
+  createNotionComment?: typeof notionOps.createComment;
+  updateNotionComment?: typeof notionOps.updateComment;
+  deleteNotionComment?: typeof notionOps.deleteComment;
+  updateNotionDataSource?: typeof notionOps.updateDataSource;
+  archiveNotionBlock?: typeof notionOps.archiveBlock;
+  appendNotionBlocks?: typeof notionOps.appendBlocks;
+  recordNotionEntity?: typeof recordNotionEntity;
   /**
    * Waits between bounded delete-absence re-reads. Injected so tests exercise the
    * real backoff logic without spending real time.
@@ -446,6 +457,36 @@ export async function executeAction(
         comment: deps.createAsanaComment ?? (async (u,t,text) => asanaRequest<AsanaResource>(u,"POST",`/tasks/${t}/stories`,{data:{text}})),
         remember: deps.recordAsanaEntity ?? recordAsanaEntity,
       });
+    }
+    if(actionId==="notion.mutate"){
+      const operation=readStr(input,"operation"),targetId=readStr(input,"targetId"),targetTitle=readStr(input,"targetTitle")??"Notion content",body=input?.body&&typeof input.body==="object"?input.body as Record<string,unknown>:{};
+      if(["comment","update_comment","delete_comment"].includes(operation)&&!ctx.capabilitiesByProvider.notion?.includes("comments.write")){const executionId=await record(userId,{proposalId:options.proposalId??null,provider:"notion",actionId,status:"blocked",requestSummary:{operation},errorMessage:"missing_comment_capability"});return{ok:false,status:"blocked",actionId,provider:"notion",userMessage:"Reconnect Notion and grant comment access before I post or change comments.",executionId};}
+      try{let result:Record<string,unknown>;
+        if(operation==="archive_page"||operation==="restore_page"){if(!targetId)throw new Error("missing target");result=await(deps.updateNotionPage??notionOps.updatePage)(userId,targetId,{in_trash:operation==="archive_page"});}
+        else if(operation==="update_page"){if(!targetId)throw new Error("missing target");result=await(deps.updateNotionPage??notionOps.updatePage)(userId,targetId,body);}
+        else if(operation==="comment"){if(!targetId)throw new Error("missing target");result=await(deps.createNotionComment??notionOps.createComment)(userId,body);}
+        else if(operation==="update_comment"){if(!targetId)throw new Error("missing target");result=await(deps.updateNotionComment??notionOps.updateComment)(userId,targetId,body);}
+        else if(operation==="delete_comment"){if(!targetId)throw new Error("missing target");result=await(deps.deleteNotionComment??notionOps.deleteComment)(userId,targetId);}
+        else if(operation==="move_page"){if(!targetId||!body.parent||typeof body.parent!=="object")throw new Error("missing target");result=await(deps.moveNotionPage??notionOps.movePage)(userId,targetId,body.parent as Record<string,unknown>);}
+        else if(operation==="schema"){if(!targetId)throw new Error("missing target");result=await(deps.updateNotionDataSource??notionOps.updateDataSource)(userId,targetId,body);}
+        else if(operation==="archive_block"){if(!targetId)throw new Error("missing target");result=await(deps.archiveNotionBlock??notionOps.archiveBlock)(userId,targetId);}
+        else if(operation==="append"){if(!targetId)throw new Error("missing target");result=await(deps.appendNotionBlocks??notionOps.appendBlocks)(userId,targetId,Array.isArray(body.children)?body.children:[]);}
+        else throw new Error("unsupported operation");
+        if(!result||typeof result!=="object")throw new Error("malformed receipt");
+        const targetMutation=new Set(["archive_page","restore_page","update_page","update_comment","delete_comment","move_page","schema","archive_block"]);
+        if(targetMutation.has(operation)&&result.id!==targetId)throw new Error("receipt target mismatch");
+        if(operation==="archive_page"&&result.in_trash!==true)throw new Error("archive postcondition mismatch");
+        if(operation==="restore_page"&&result.in_trash!==false)throw new Error("restore postcondition mismatch");
+        if(operation==="move_page"){
+          const expected=body.parent as Record<string,unknown>,actual=result.parent&&typeof result.parent==="object"?result.parent as Record<string,unknown>:null;
+          const type=readStr(expected,"type"),key=type==="data_source_id"?"data_source_id":"page_id";
+          if(!actual||actual.type!==type||actual[key]!==expected[key])throw new Error("move postcondition mismatch");
+        }
+        if(operation==="append"&&(result.object!=="list"||!Array.isArray(result.results)))throw new Error("append receipt malformed");
+        if(typeof result.id==="string"&&result.object!=="list")await(deps.recordNotionEntity??recordNotionEntity)(userId,result);
+        const executionId=await record(userId,{proposalId:options.proposalId??null,provider:"notion",actionId,status:"succeeded",requestSummary:{operation},resultSummary:{receiptValidated:true}});
+        return{ok:true,status:"succeeded",actionId,provider:"notion",userMessage:operation==="archive_page"?`Archived the Notion page “${targetTitle}”.`:operation==="restore_page"?`Restored the Notion page “${targetTitle}”.`:operation==="update_page"?`Updated the Notion page or record “${targetTitle}”.`:operation==="comment"?`Posted the comment on “${targetTitle}”.`:operation==="update_comment"?`Updated the Notion comment “${targetTitle}”.`:operation==="delete_comment"?`Deleted the Notion comment “${targetTitle}”.`:operation==="move_page"?`Moved the Notion page “${targetTitle}”.`:operation==="append"?`Added the content to “${targetTitle}”.`:`Updated the Notion data source “${targetTitle}”.`,executionId};
+      }catch(error){const executionId=await record(userId,{proposalId:options.proposalId??null,provider:"notion",actionId,status:"failed",requestSummary:{operation},errorMessage:error instanceof Error?error.name:"execution_failed"});return{ok:false,status:"failed",actionId,provider:"notion",userMessage:"I couldn’t verify that Notion change, so I won’t say it succeeded.",executionId};}
     }
     if(actionId==="asana.portfolio.membership"){
       const portfolioId=readStr(input,"portfolioId"),itemId=readStr(input,"itemId"),operation=readStr(input,"operation");

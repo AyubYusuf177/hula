@@ -94,7 +94,7 @@ export function deriveIntegrationView(
     state,
     connected: backendState === 'connected',
     statusLabel: statusLabelFor(state),
-    accountLabel: status?.providerAccountEmail ?? null,
+    accountLabel: status?.connectedAccountName ?? status?.providerAccountEmail ?? null,
   };
 }
 

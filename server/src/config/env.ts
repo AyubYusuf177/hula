@@ -88,6 +88,13 @@ const envSchema = z.object({
   ASANA_OAUTH_REDIRECT_URI: z.string().optional(),
   ASANA_SCOPES: z.string().optional(),
 
+  // Notion public OAuth (Section 21). Validated lazily by the Notion provider so
+  // local/test boot remains possible without production credentials.
+  NOTION_OAUTH_CLIENT_ID: z.string().optional(),
+  NOTION_OAUTH_CLIENT_SECRET: z.string().optional(),
+  NOTION_OAUTH_REDIRECT_URI: z.string().url().optional(),
+  NOTION_API_VERSION: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().default("2026-03-11"),
+
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),
 });

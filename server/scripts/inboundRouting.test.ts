@@ -267,6 +267,9 @@ check("order: the cascade order is pinned", () => {
     // handler ORDER can decide that, so the highest handler would otherwise win
     // every ambiguous pronoun forever.
     "entityFollowup",
+    // Section 21: explicit and context-owned Notion content is extracted before
+    // task providers; its semantic provider gate declines their domains.
+    "notion",
     // Section 20: explicitly named Asana work must be interpreted before the
     // Todoist task gate; both Asana handlers still decline non-Asana intents.
     "asanaWrite",

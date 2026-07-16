@@ -48,6 +48,7 @@ import { listRecentProposalsByAction, type ActionProposalView } from "./proposal
 export type EntityKind =
   | "todoist_task"
   | "asana_task"
+  | "notion_entity"
   | "gmail_email"
   | "gmail_draft"
   | "calendar_event"
@@ -62,6 +63,8 @@ export type EntityKind =
  * happen. The ids are a stable storage contract, and the tests pin them.
  */
 export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" }[] = [
+  { actionId: "notion.lastSelection", kind: "notion_entity" },
+  { actionId: "notion.entityContext", kind: "notion_entity" },
   { actionId: "asana.lastSelection", kind: "asana_task" },
   { actionId: "asana.entityContext", kind: "asana_task" },
   { actionId: "todoist.lastSelection", kind: "todoist_task" },
@@ -118,6 +121,7 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
   if (/\basana\b/.test(t)) {
     kinds.add("asana_task");
   }
+  if (/\bnotion\b|\b(?:page|record|data source|database|block|comment)\s+(?:in\s+)?notion\b/.test(t)) kinds.add("notion_entity");
   if (!/\basana\b/.test(t) && (
     /\bpriority\b/.test(t) ||
     /\btasks?\b/.test(t) ||
@@ -251,7 +255,10 @@ export async function loadGroundedContexts(
     }
     for (const row of rows) {
       if (Date.parse(row.expiresAt) <= nowMs) continue;
-      const at = Date.parse(row.createdAt);
+      const payloadAt = (row.input as { contextEstablishedAt?: unknown } | null)?.contextEstablishedAt;
+      const at = typeof payloadAt === "number" && Number.isFinite(payloadAt)
+        ? payloadAt
+        : Date.parse(row.createdAt);
       if (!Number.isFinite(at)) continue;
       found.push({
         kind: source.kind === "gmail_either" ? gmailKindFromRow(row) : source.kind,
@@ -276,6 +283,7 @@ export function conflictClarification(kinds: readonly EntityKind[]): string {
   const label: Record<EntityKind, string> = {
     todoist_task: "a Todoist task",
     asana_task: "an Asana task",
+    notion_entity: "Notion content",
     gmail_email: "an email",
     gmail_draft: "an email draft",
     calendar_event: "a calendar event",

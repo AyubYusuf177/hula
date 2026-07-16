@@ -138,6 +138,21 @@ function calendarList(store: FakeContextStore, userId: string, agoMs = 0) {
     { agoMs },
   );
 }
+function asanaList(store: FakeContextStore, userId: string, agoMs = 0) {
+  store.add(userId,"asana.lastSelection",{kind:"asana_selection",items:[{gid:"a1",name:"First"},{gid:"a2",name:"Second"}]},{agoMs});
+}
+function notionList(store: FakeContextStore, userId: string, agoMs = 0, contextEstablishedAt?: number) {
+  store.add(
+    userId,
+    "notion.lastSelection",
+    {
+      kind: "notion_selection",
+      refs: [{ id: "n1", type: "page", title: "First" }, { id: "n2", type: "page", title: "Second" }],
+      ...(contextEstablishedAt === undefined ? {} : { contextEstablishedAt }),
+    },
+    { agoMs },
+  );
+}
 
 /**
  * Route through the REAL cascade with every provider handler stubbed to shout its
@@ -256,6 +271,35 @@ async function run(): Promise<void> {
     todoistList(store, "u1", 1000); // one second ago
     const contexts = await loadGroundedContexts("u1", { listRecent: store.listRecent, now: NOW });
     assert.equal(contexts[0]?.kind, "todoist_task");
+  });
+
+  await asyncCheck("a fresh Notion selection outranks a stale Gmail selection even when database timestamps tie", async () => {
+    const store = new FakeContextStore();
+    gmailEmailList(store, "u1");
+    notionList(store, "u1", 0, NOW.getTime() + 1);
+    const owner = await resolveFollowupOwner("u1", "Tell me more about the second one", {
+      listRecent: store.listRecent,
+      now: NOW,
+    });
+    assert.deepEqual(owner, { kind: "owner", owner: "notion_entity", reason: "context" });
+    const result = await handleEntityFollowup("u1", "Tell me more about the second one", {
+      listRecent: store.listRecent,
+      now: NOW,
+      notion: async () => ({ handled: true, reply: "Second Notion page details" }),
+    });
+    assert.equal(result.reply, "Second Notion page details");
+    assert.doesNotMatch(result.reply ?? "", /email|gmail/i);
+  });
+
+  await asyncCheck("the newest Notion context outranks older Gmail, Calendar, Todoist and Asana contexts", async () => {
+    const store = new FakeContextStore();
+    gmailEmailList(store,"u1",20_000);
+    calendarList(store,"u1",15_000);
+    todoistList(store,"u1",10_000);
+    asanaList(store,"u1",5_000);
+    notionList(store,"u1",1_000,NOW.getTime()-1_000);
+    const owner=await resolveFollowupOwner("u1","Tell me more about the second one",{listRecent:store.listRecent,now:NOW});
+    assert.deepEqual(owner,{kind:"owner",owner:"notion_entity",reason:"context"});
   });
 
   await asyncCheck("Gmail's single selection id distinguishes drafts from messages", async () => {

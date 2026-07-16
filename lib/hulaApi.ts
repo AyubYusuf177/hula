@@ -208,8 +208,10 @@ export interface IntegrationStatus {
   connectionStatus: 'disconnected' | 'connected' | 'expired' | 'revoked' | 'error';
   connected: boolean;
   providerAccountEmail: string | null;
+  connectedAccountName?: string | null;
   connectedAt: string | null;
   lastSyncedAt: string | null;
+  configured?: boolean;
 }
 
 /** Fetch the provider catalog (static metadata, no user data). */
@@ -664,6 +666,16 @@ export async function connectAsana(token:string,params:{appReturnUrl?:string}={}
 }
 export const fetchAsanaStatus=(token:string)=>fetchIntegrationStatus(token,ASANA_PROVIDER);
 export const disconnectAsana=(token:string)=>disconnectIntegration(token,ASANA_PROVIDER);
+
+// --- Notion (Section 21) ------------------------------------------------
+export const NOTION_PROVIDER='notion';
+export class NotionNotConfiguredError extends Error {constructor(){super('Notion connect is not configured on the Hula backend yet.');this.name='NotionNotConfiguredError';}}
+export async function connectNotion(token:string,params:{appReturnUrl?:string}={}):Promise<{provider:string;authorizationUrl:string;expiresAt:string}>{
+  if(!BASE_URL)throw new MissingApiUrlError();const res=await fetch(`${BASE_URL}/v1/me/integrations/${NOTION_PROVIDER}/connect`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(params.appReturnUrl?{appReturnUrl:params.appReturnUrl}:{})});
+  if(res.status===400)throw new NotionNotConfiguredError();if(!res.ok)throw new Error(`notion/connect failed (${res.status})`);const data=await res.json() as {provider:string;authorizationUrl?:string;expiresAt:string};if(!data.authorizationUrl)throw new Error('notion/connect returned no authorization URL');return data as {provider:string;authorizationUrl:string;expiresAt:string};
+}
+export const fetchNotionStatus=(token:string)=>fetchIntegrationStatus(token,NOTION_PROVIDER);
+export const disconnectNotion=(token:string)=>disconnectIntegration(token,NOTION_PROVIDER);
 
 /** A single safe, normalized Gmail message (metadata + snippet only, no body). */
 export interface GmailMessage {

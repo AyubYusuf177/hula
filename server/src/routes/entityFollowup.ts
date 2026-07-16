@@ -1,6 +1,7 @@
 import { handleTodoistWrite } from "../integrations/providers/todoist/todoistActions";
 import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
+import { handleNotionConversation } from "../integrations/providers/notion/conversation";
 import { logger } from "../utils/logger";
 import {
   isDestructiveFollowup,
@@ -41,6 +42,7 @@ export interface EntityFollowupDeps extends ArbiterDeps {
   todoistWrite?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   asanaWrite?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   asanaRead?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  notion?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
 }
 
 /**
@@ -104,6 +106,10 @@ export async function handleEntityFollowup(
     if (readResult.handled) return readResult;
     const asanaWrite = deps.asanaWrite ?? ((u, t) => handleAsanaWrite(u, t, { arbitrated: true }));
     return asanaWrite(userId, text);
+  }
+  if(owner.owner==="notion_entity"){
+    logger.info("entityFollowup routed",{owner:owner.owner,reason:owner.reason});
+    return (deps.notion??((u,t)=>handleNotionConversation(u,t,{arbitrated:true})))(userId,text);
   }
 
   if (owner.owner !== "todoist_task") {

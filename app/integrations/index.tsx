@@ -31,10 +31,12 @@ import {
   connectAsana,
   connectGoogleCalendar,
   connectTodoist,
+  connectNotion,
   disconnectGmail,
   disconnectAsana,
   disconnectGoogleCalendar,
   disconnectTodoist,
+  disconnectNotion,
   fetchUserIntegrations,
   GMAIL_PROVIDER,
   ASANA_PROVIDER,
@@ -45,6 +47,8 @@ import {
   MissingApiUrlError,
   TODOIST_PROVIDER,
   TodoistNotConfiguredError,
+  NOTION_PROVIDER,
+  NotionNotConfiguredError,
   type IntegrationStatus,
 } from '@/lib/hulaApi';
 import {
@@ -89,6 +93,7 @@ const CONNECT_STARTERS: Record<string, ConnectStarter | undefined> = {
   [GMAIL_PROVIDER]: (token, appReturnUrl) => connectGmail(token, { appReturnUrl }),
   [TODOIST_PROVIDER]: (token, appReturnUrl) => connectTodoist(token, { appReturnUrl }),
   [ASANA_PROVIDER]: (token, appReturnUrl) => connectAsana(token, { appReturnUrl }),
+  [NOTION_PROVIDER]: (token, appReturnUrl) => connectNotion(token, { appReturnUrl }),
 };
 
 const DISCONNECTERS: Record<
@@ -99,6 +104,7 @@ const DISCONNECTERS: Record<
   [GMAIL_PROVIDER]: disconnectGmail,
   [TODOIST_PROVIDER]: disconnectTodoist,
   [ASANA_PROVIDER]: disconnectAsana,
+  [NOTION_PROVIDER]: disconnectNotion,
 };
 
 type StatusMap = Record<string, IntegrationStatus | null>;
@@ -252,7 +258,7 @@ export default function IntegrationsScreen() {
     [statuses],
   );
   const availableProviders = useMemo(
-    () => INTEGRATION_PROVIDERS.filter((p) => !statuses[p.id]?.connected),
+    () => INTEGRATION_PROVIDERS.filter((p) => statuses[p.id]?.configured !== false && !statuses[p.id]?.connected),
     [statuses],
   );
 
@@ -296,6 +302,7 @@ export default function IntegrationsScreen() {
         err instanceof GmailNotConfiguredError ||
         err instanceof TodoistNotConfiguredError
         || err instanceof AsanaNotConfiguredError
+        || err instanceof NotionNotConfiguredError
           ? 'This connection isn’t available yet. Please try again later.'
           : err instanceof MissingApiUrlError
             ? 'Hula backend URL is not configured.'

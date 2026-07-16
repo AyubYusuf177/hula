@@ -89,6 +89,15 @@ function emptyContext(): ActionPolicyContext {
   };
 }
 
+function notionWriteContext(userConfirmed?: boolean): ActionPolicyContext {
+  return {
+    connectedProviders: ["notion"],
+    grantedScopesByProvider: { notion: ["content:write", "comments:write"] },
+    capabilitiesByProvider: { notion: ["content.write", "comments.write"] },
+    userConfirmed,
+  };
+}
+
 // --- Registry ------------------------------------------------------------
 
 check("registry: contains the expected actions", () => {
@@ -104,7 +113,6 @@ check("registry: contains the expected actions", () => {
     "email.sendDraft",
     "task.create",
     "task.complete",
-    "document.search",
     "document.appendText",
     "slack.postMessage",
     "shopping.createList",
@@ -132,7 +140,7 @@ check("registry: every action has complete, typed metadata", () => {
   }
 });
 
-check("registry: implemented actions are the calendar/Gmail/Todoist/Asana adapters", () => {
+check("registry: implemented actions include the Notion adapter", () => {
   const implemented = ACTION_DEFINITIONS.filter((a) => a.implemented).map((a) => a.actionId);
   // Section 16 added real Gmail draft creation + send to the Section 11 calendar
   // reads; Section 17 adds the confirmation-gated calendar event writes; Section 19
@@ -160,6 +168,7 @@ check("registry: implemented actions are the calendar/Gmail/Todoist/Asana adapte
     "email.trash",
     "email.untrash",
     "email.updateDraft",
+    "notion.mutate",
     "task.complete",
     "task.create",
     "task.delete",
@@ -1000,6 +1009,47 @@ asyncCheck("executor: an empty label change is refused, not sent to Gmail", asyn
   );
   assert.equal(result.ok, false);
   assert.equal(called, false);
+});
+
+asyncCheck("executor: every confirmed Notion mutation uses an injected provider and validates its receipt", async () => {
+  const operations = ["archive_page", "restore_page", "update_page", "comment", "update_comment", "delete_comment", "move_page", "schema", "archive_block", "append"] as const;
+  for (const operation of operations) {
+    let called = 0;
+    const receipt = operation === "append" ? { object: "list", results: [], has_more: false, next_cursor: null } : { object: operation.includes("comment") ? "comment" : operation === "archive_block" ? "block" : operation === "schema" ? "data_source" : "page", id: "target", ...(operation==="archive_page"?{in_trash:true}:operation==="restore_page"?{in_trash:false}:operation==="move_page"?{parent:{type:"page_id",page_id:"parent"}}:{}) };
+    const result = await executeAction("user_fake", "notion.mutate", { userConfirmed: true, input: { operation, targetId: "target", targetTitle: "Launch Plan", body: operation === "move_page" ? { parent: { type: "page_id", page_id: "parent" } } : operation === "append" ? { children: [] } : {} } }, {
+      buildContext: async (_u:string, options:{userConfirmed?:boolean}) => notionWriteContext(options.userConfirmed),
+      record: async () => `exec-${operation}`,
+      updateNotionPage: async () => { called += 1; return receipt; },
+      moveNotionPage: async () => { called += 1; return receipt; },
+      createNotionComment: async () => { called += 1; return receipt; },
+      updateNotionComment: async () => { called += 1; return receipt; },
+      deleteNotionComment: async () => { called += 1; return receipt; },
+      updateNotionDataSource: async () => { called += 1; return receipt; },
+      archiveNotionBlock: async () => { called += 1; return receipt; },
+      appendNotionBlocks: async () => { called += 1; return receipt; },
+      recordNotionEntity: async () => undefined,
+    } as never);
+    assert.equal(called, 1, `${operation} must execute exactly once`);
+    assert.equal(result.ok, true, `${operation} must accept its authoritative fake receipt`);
+  }
+});
+
+asyncCheck("executor: an unconfirmed or malformed Notion mutation never reports success", async () => {
+  let called = false;
+  const blocked = await executeAction("user_fake", "notion.mutate", { input: { operation: "archive_page", targetId: "page", targetTitle: "Plan", body: {} } }, { buildContext: async () => notionWriteContext(false), record: async () => "blocked", updateNotionPage: async () => { called = true; return { object: "page", id: "page" }; } });
+  assert.equal(blocked.ok, false);
+  assert.equal(called, false);
+  const failed = await executeAction("user_fake", "notion.mutate", { userConfirmed: true, input: { operation: "archive_page", targetId: "page", targetTitle: "Plan", body: {} } }, { buildContext: async (_u, options) => notionWriteContext(options.userConfirmed), record: async () => "failed", updateNotionPage: async () => null as never });
+  assert.equal(failed.ok, false);
+  assert.match(failed.userMessage, /couldn’t verify/);
+});
+
+asyncCheck("executor: Notion target and archive postcondition mismatches are never successes",async()=>{
+  for(const receipt of [{object:"page",id:"wrong",in_trash:true},{object:"page",id:"page",in_trash:false}]){
+    const result=await executeAction("user_fake","notion.mutate",{userConfirmed:true,input:{operation:"archive_page",targetId:"page",targetTitle:"Plan",body:{}}},{buildContext:async(_u,options)=>notionWriteContext(options.userConfirmed),record:async()=>"mismatch",updateNotionPage:async()=>receipt,recordNotionEntity:async()=>undefined});
+    assert.equal(result.ok,false);
+    assert.match(result.userMessage,/couldn’t verify/);
+  }
 });
 
 asyncCheck("executor: unknown action fails safely without a provider call", async () => {

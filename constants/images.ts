@@ -7,6 +7,7 @@ import googleCalendar from '@/assets/images/integrations/google-calendar.png';
 import gmail from '@/assets/images/integrations/gmail.png';
 import todoist from '@/assets/images/integrations/todoist.png';
 import asana from '@/assets/images/integrations/asana.png';
+import notion from '@/assets/images/integrations/notion.png';
 
 export const images = {
   hulaLogo,
@@ -29,4 +30,6 @@ export const integrationIcons = {
   // Current official Asana square logo, downloaded unmodified from Asana's
   // official brand asset CDN.
   asana,
+  // Official, unmodified Notion iOS product mark served by notion.so.
+  notion,
 } as const;

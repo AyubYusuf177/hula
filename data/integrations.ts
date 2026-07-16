@@ -13,7 +13,7 @@
 import type { ImageSourcePropType } from 'react-native';
 
 import { integrationIcons } from '@/constants/images';
-import { ASANA_PROVIDER, GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER, TODOIST_PROVIDER } from '@/lib/hulaApi';
+import { ASANA_PROVIDER, GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER, NOTION_PROVIDER, TODOIST_PROVIDER } from '@/lib/hulaApi';
 
 /** A display category grouping on the Integrations screen. */
 export type IntegrationCategoryId = 'ORGANIZATION';
@@ -120,6 +120,21 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     connectLabel: 'Connect Asana',
     authorizationProviderLabel: 'Asana',
     disconnectLabel: 'Disconnect Asana',
+  },
+  {
+    id: NOTION_PROVIDER,
+    displayName: 'Notion',
+    category: 'ORGANIZATION',
+    iconImage: integrationIcons.notion,
+    accent: '#FFFFFF',
+    summary: 'Reads and safely manages shared Notion content from iMessage.',
+    sheetHeading: 'Notion',
+    connectedHeading: 'Notion',
+    sheetBody: 'Connect Notion to search, read and safely manage pages, records, blocks, comments and data sources shared with Hula. Shared, destructive and externally visible changes ask first.',
+    connectedBody: 'Hula can work with Notion content shared with this connection. Private or unshared pages remain inaccessible; comments, archives and schema changes always ask first.',
+    connectLabel: 'Connect Notion',
+    authorizationProviderLabel: 'Notion',
+    disconnectLabel: 'Disconnect Notion',
   },
 ] as const;
 

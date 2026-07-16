@@ -286,6 +286,12 @@ check("status: no connection maps to a disconnected item", () => {
   assert.equal(item.connectedAt, null);
 });
 
+check("status: backend configuration truth can hide an unavailable OAuth provider", () => {
+  const item=toIntegrationStatusItem({...GCAL_ENTRY,provider:"notion",displayName:"Notion"},undefined,false);
+  assert.equal(item.configured,false);
+  assert.equal(item.connected,false);
+});
+
 check("status: a connected connection maps to connected=true", () => {
   const conn: IntegrationConnectionView = {
     provider: "google_calendar",

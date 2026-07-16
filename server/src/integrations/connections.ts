@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { getPrisma } from "../db/prisma";
+import { env } from "../config/env";
 import {
   getProvider,
   isKnownProvider,
@@ -56,8 +57,10 @@ export interface IntegrationStatusItem {
   connectionStatus: IntegrationConnectionStatusValue;
   connected: boolean;
   providerAccountEmail: string | null;
+  connectedAccountName: string | null;
   connectedAt: string | null;
   lastSyncedAt: string | null;
+  configured?: boolean;
 }
 
 /** Re-export so callers/endpoints have one import site for the catalog. */
@@ -155,6 +158,7 @@ export function toIntegrationStatusItem(
     authType: ProviderAuthType;
   },
   conn: IntegrationConnectionView | undefined,
+  configured = true,
 ): IntegrationStatusItem {
   const status = conn?.status ?? "disconnected";
   return {
@@ -166,8 +170,10 @@ export function toIntegrationStatusItem(
     connectionStatus: status,
     connected: status === "connected",
     providerAccountEmail: conn?.providerAccountEmail ?? null,
+    connectedAccountName: conn?.displayName ?? null,
     connectedAt: conn?.connectedAt ?? null,
     lastSyncedAt: conn?.lastSyncedAt ?? null,
+    ...(configured ? {} : { configured: false }),
   };
 }
 
@@ -179,7 +185,10 @@ export async function getUserIntegrationStatus(
 
   return listIntegrationCatalog()
     .filter((entry) => entry.provider !== "generic")
-    .map((entry) => toIntegrationStatusItem(entry, byProvider.get(entry.provider)));
+    .map((entry) => {
+      const configured=entry.provider!=="notion"||Boolean(env.NOTION_OAUTH_CLIENT_ID&&env.NOTION_OAUTH_CLIENT_SECRET&&env.NOTION_OAUTH_REDIRECT_URI&&env.NOTION_API_VERSION&&env.INTEGRATION_TOKEN_ENCRYPTION_KEY);
+      return toIntegrationStatusItem(entry,byProvider.get(entry.provider),configured);
+    });
 }
 
 /** Connected provider DISPLAY names only — safe, for optional brain context. */
