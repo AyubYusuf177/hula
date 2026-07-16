@@ -230,7 +230,9 @@ async function run(): Promise<void> {
 
   check("typed nouns name an entity; generic verbs never do", () => {
     assert.deepEqual(explicitEntityKinds("change the second one's priority to high"), ["todoist_task"]);
-    assert.deepEqual(explicitEntityKinds("complete it"), ["todoist_task"]);
+    // Completion/reopen are provider-neutral verbs. Durable context owns them;
+    // treating them as Todoist vocabulary would steal Asana follow-ups.
+    assert.deepEqual(explicitEntityKinds("complete it"), []);
     assert.deepEqual(explicitEntityKinds("move it to my project"), ["todoist_task"]);
     assert.deepEqual(explicitEntityKinds("change the second draft's body"), ["gmail_draft"]);
     assert.deepEqual(explicitEntityKinds("reply to the second one"), ["gmail_email"]);

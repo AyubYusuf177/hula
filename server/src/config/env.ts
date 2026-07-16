@@ -81,6 +81,13 @@ const envSchema = z.object({
   TODOIST_OAUTH_REDIRECT_URI: z.string().optional(),
   TODOIST_SCOPES: z.string().optional(),
 
+  // Asana OAuth (Section 20). Secrets remain server-side; these are optional at
+  // boot and validated when a user starts a connection.
+  ASANA_OAUTH_CLIENT_ID: z.string().optional(),
+  ASANA_OAUTH_CLIENT_SECRET: z.string().optional(),
+  ASANA_OAUTH_REDIRECT_URI: z.string().optional(),
+  ASANA_SCOPES: z.string().optional(),
+
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),
 });

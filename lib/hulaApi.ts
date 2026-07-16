@@ -648,6 +648,23 @@ export async function disconnectTodoist(
   return disconnectIntegration(token, TODOIST_PROVIDER);
 }
 
+// --- Asana (Section 20) --------------------------------------------------
+export const ASANA_PROVIDER = 'asana';
+export class AsanaNotConfiguredError extends Error {
+  constructor() { super('Asana connect is not configured on the Hula backend yet.'); this.name = 'AsanaNotConfiguredError'; }
+}
+export async function connectAsana(token:string,params:{appReturnUrl?:string}={}):Promise<{provider:string;authorizationUrl:string;expiresAt:string}>{
+  if(!BASE_URL) throw new MissingApiUrlError();
+  const res=await fetch(`${BASE_URL}/v1/me/integrations/${ASANA_PROVIDER}/connect`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(params.appReturnUrl?{appReturnUrl:params.appReturnUrl}:{})});
+  if(res.status===400)throw new AsanaNotConfiguredError();
+  if(!res.ok)throw new Error(`asana/connect failed (${res.status})`);
+  const data=await res.json() as {provider:string;authorizationUrl?:string;expiresAt:string};
+  if(!data.authorizationUrl)throw new Error('asana/connect returned no authorization URL');
+  return data as {provider:string;authorizationUrl:string;expiresAt:string};
+}
+export const fetchAsanaStatus=(token:string)=>fetchIntegrationStatus(token,ASANA_PROVIDER);
+export const disconnectAsana=(token:string)=>disconnectIntegration(token,ASANA_PROVIDER);
+
 /** A single safe, normalized Gmail message (metadata + snippet only, no body). */
 export interface GmailMessage {
   id: string;

@@ -28,7 +28,7 @@ export type ActionCategory =
 /** A lightweight typed field in an action's input/output schema. */
 export interface ActionField {
   name: string;
-  type: "string" | "number" | "boolean" | "datetime" | "string[]";
+  type: "string" | "number" | "boolean" | "datetime" | "string[]" | "object";
   required: boolean;
   description: string;
 }
@@ -72,6 +72,32 @@ export interface ActionDefinition {
 const GCAL_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 
+const ASANA_RESOURCE_ACTIONS: ActionDefinition[] = ([
+  ["project", "projects", "projects", true, true],
+  ["section", null, "sections", false, false],
+  ["portfolio", "portfolios", "portfolios", true, false],
+  ["goal", null, "goals", false, false],
+  ["time_entry", null, "time_tracking", false, false],
+] as const).flatMap(([entity, scope, capability, canWrite, canDelete]) => [
+  {
+    actionId: `asana.${entity}.write`, category: "tasks", displayName: `Write Asana ${entity}`,
+    description: `Create or update a resolved Asana ${entity}.`, providerTypes: ["asana"],
+    requiredCapabilities: canWrite?[`${capability}.write`]:[], requiredScopes: canWrite&&scope?[`${scope}:write`]:[],
+    riskLevel: "write", confirmationRequired: true, implemented: canWrite, enabled: true,
+    inputSchema: [{name:"operation",type:"string",required:true,description:"create or update"},{name:"resourceId",type:"string",required:false,description:"Resolved target"},{name:"data",type:"object",required:true,description:"Validated provider fields"}],
+    examples: [`create an Asana ${entity}`, `update that Asana ${entity}`],
+    userFacingDescription: canWrite?`I couldn’t change that Asana ${entity} just now.`:`Asana’s current named OAuth scopes do not authorise ${entity.replace("_"," ")} changes, so Hula won’t attempt them.`,
+  },
+  {
+    actionId: `asana.${entity}.delete`, category: "tasks", displayName: `Delete Asana ${entity}`,
+    description: `Permanently delete a resolved Asana ${entity}.`, providerTypes: ["asana"],
+    requiredCapabilities: canDelete?[`${capability}.delete`]:[], requiredScopes: canDelete&&scope?[`${scope}:delete`]:[],
+    riskLevel: "write", confirmationRequired: true, implemented: canDelete, enabled: true,
+    inputSchema: [{name:"resourceId",type:"string",required:true,description:"Resolved target"},{name:"title",type:"string",required:true,description:"Safe title"}],
+    examples: [`delete that Asana ${entity}`], userFacingDescription: canDelete?`I couldn’t delete that Asana ${entity} just now.`:`Asana’s current named OAuth scopes do not authorise ${entity.replace("_"," ")} deletion, so Hula won’t attempt it.`,
+  },
+]);
+
 /**
  * The action registry. `implemented + enabled` means a real deterministic adapter
  * in the executor backs the action: the Google Calendar reads (Section 11), the
@@ -85,6 +111,7 @@ const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
  * the other, so they must be changed together.
  */
 export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
+  ...ASANA_RESOURCE_ACTIONS,
   // --- Calendar ----------------------------------------------------------
   {
     actionId: "calendar.listEvents",
@@ -670,6 +697,36 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     examples: ["delete that task", "get rid of the pitch deck task"],
     userFacingDescription:
       "I couldn’t delete that task just now — mind trying again in a moment?",
+  },
+  // --- Asana -------------------------------------------------------------
+  {
+    actionId: "asana.task.create", category: "tasks", displayName: "Create Asana task",
+    description: "Create an Asana task from validated, resolved fields.", providerTypes: ["asana"],
+    requiredCapabilities: ["tasks.write"], requiredScopes: ["tasks:write"], riskLevel: "modify",
+    confirmationRequired: false, implemented: true, enabled: true,
+    inputSchema: [{name:"name",type:"string",required:true,description:"Task name."},{name:"workspace",type:"string",required:false,description:"Resolved workspace."},{name:"projects",type:"string[]",required:false,description:"Resolved projects."}],
+    examples:["add this task to Asana"],userFacingDescription:"I couldn’t create that Asana task just now.",
+  },
+  {
+    actionId: "asana.task.update", category: "tasks", displayName: "Update Asana task",
+    description: "Update, complete, reopen, assign or reschedule resolved Asana tasks.", providerTypes:["asana"],
+    requiredCapabilities:["tasks.write"],requiredScopes:["tasks:write"],riskLevel:"modify",confirmationRequired:false,implemented:true,enabled:true,
+    inputSchema:[{name:"taskIds",type:"string[]",required:true,description:"Resolved task ids."},{name:"fields",type:"object",required:true,description:"Validated Asana task fields."}],examples:["complete the second Asana task"],userFacingDescription:"I couldn’t update that Asana task just now.",
+  },
+  {
+    actionId:"asana.task.relationship",category:"tasks",displayName:"Change Asana task relationship",description:"Move tasks, followers, tags and dependencies using resolved ids.",providerTypes:["asana"],requiredCapabilities:["tasks.write"],requiredScopes:["tasks:write"],riskLevel:"modify",confirmationRequired:false,implemented:true,enabled:true,inputSchema:[{name:"taskIds",type:"string[]",required:true,description:"Resolved task ids."},{name:"relationshipAction",type:"string",required:true,description:"Allowlisted relationship action."},{name:"relationshipInput",type:"object",required:true,description:"Resolved relationship ids."}],examples:["move it to In Progress"],userFacingDescription:"I couldn’t change that Asana task relationship just now.",
+  },
+  {
+    actionId:"asana.task.attachUrl",category:"tasks",displayName:"Attach URL to Asana task",description:"Attach a validated HTTPS URL to a resolved Asana task.",providerTypes:["asana"],requiredCapabilities:["attachments.write"],requiredScopes:["attachments:write"],riskLevel:"write",confirmationRequired:true,implemented:true,enabled:true,inputSchema:[{name:"taskIds",type:"string[]",required:true,description:"Resolved task ids."},{name:"relationshipInput",type:"object",required:true,description:"Validated external URL."}],examples:["attach this URL to that Asana task"],userFacingDescription:"I couldn’t attach that URL to the Asana task just now.",
+  },
+  {
+    actionId:"asana.task.comment",category:"tasks",displayName:"Comment on Asana task",description:"Post a comment that may notify collaborators.",providerTypes:["asana"],requiredCapabilities:["collaboration.write"],requiredScopes:["stories:write"],riskLevel:"send",confirmationRequired:true,implemented:true,enabled:true,inputSchema:[{name:"taskIds",type:"string[]",required:true,description:"Resolved task ids."},{name:"text",type:"string",required:true,description:"Comment text."}],examples:["comment on that Asana task"],userFacingDescription:"I couldn’t post that Asana comment just now.",
+  },
+  {
+    actionId:"asana.task.delete",category:"tasks",displayName:"Delete Asana task",description:"Permanently delete resolved Asana tasks.",providerTypes:["asana"],requiredCapabilities:["tasks.delete"],requiredScopes:["tasks:delete"],riskLevel:"write",confirmationRequired:true,implemented:true,enabled:true,inputSchema:[{name:"taskIds",type:"string[]",required:true,description:"Resolved task ids."},{name:"titles",type:"string[]",required:true,description:"Safe task titles."}],examples:["delete that Asana task"],userFacingDescription:"I couldn’t delete that Asana task just now.",
+  },
+  {
+    actionId:"asana.portfolio.membership",category:"tasks",displayName:"Change Asana portfolio membership",description:"Add or remove a verified project from a verified portfolio.",providerTypes:["asana"],requiredCapabilities:["portfolios.write"],requiredScopes:["portfolios:write"],riskLevel:"write",confirmationRequired:true,implemented:true,enabled:true,inputSchema:[{name:"portfolioId",type:"string",required:true,description:"Resolved portfolio."},{name:"itemId",type:"string",required:true,description:"Resolved project."},{name:"operation",type:"string",required:true,description:"addItem or removeItem."}],examples:["add that project to my portfolio"],userFacingDescription:"I couldn’t verify that Asana portfolio change.",
   },
   // --- Documents ---------------------------------------------------------
   {

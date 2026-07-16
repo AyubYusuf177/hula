@@ -94,6 +94,12 @@ import {
   formatLocalTime,
 } from "../integrations/providers/todoist/todoistDisplay";
 import type { NormalizedTodoistTask } from "../integrations/providers/todoist/types";
+import { AsanaError } from "../integrations/providers/asana/client";
+import { asanaRequest } from "../integrations/providers/asana/client";
+import { createAsanaResource, createAsanaTask, deleteAsanaResource, getAsanaResource, listAsanaChildren, listAsanaTasks, mutateAsanaPortfolioItem, mutateAsanaRelationship, updateAsanaResource, updateAsanaTask, type AsanaReceipt } from "../integrations/providers/asana/operations";
+import type { AsanaResource } from "../integrations/providers/asana/types";
+import { recordAsanaEntity, toAsanaContextItem } from "../integrations/providers/asana/asanaContext";
+import { asanaPlainText } from "../integrations/providers/asana/plainText";
 import { buildActionPolicyContext } from "./context";
 import { evaluateActionForUser, type ActionPolicyContext } from "./policy";
 import { recordActionExecution, type ActionExecutionStatusValue } from "./executions";
@@ -157,6 +163,8 @@ export interface ActionExecutionResult {
      * provably happened.
      */
     taskIds?: string[];
+    /** Asana-issued ids backed by validated receipts/read-back state. */
+    asanaResourceIds?: string[];
   };
 }
 
@@ -229,6 +237,18 @@ export interface ExecuteActionDeps {
   fetchTodoistTask?: typeof fetchTask;
   /** Records "the task you just completed" — ONLY after verification. */
   recordActedTodoistTask?: typeof recordActedTodoistTask;
+  createAsanaTask?: typeof createAsanaTask;
+  updateAsanaTask?: typeof updateAsanaTask;
+  deleteAsanaResource?: typeof deleteAsanaResource;
+  mutateAsanaRelationship?: typeof mutateAsanaRelationship;
+  mutateAsanaPortfolioItem?: typeof mutateAsanaPortfolioItem;
+  getAsanaResource?: typeof getAsanaResource;
+  listAsanaTasks?: typeof listAsanaTasks;
+  listAsanaChildren?: typeof listAsanaChildren;
+  createAsanaComment?: (userId:string,taskId:string,text:string)=>Promise<AsanaResource>;
+  recordAsanaEntity?: typeof recordAsanaEntity;
+  createAsanaResource?: typeof createAsanaResource;
+  updateAsanaResource?: typeof updateAsanaResource;
   /**
    * Waits between bounded delete-absence re-reads. Injected so tests exercise the
    * real backoff logic without spending real time.
@@ -412,6 +432,35 @@ export async function executeAction(
           sleep: deps.sleep,
         },
       );
+    }
+
+    if (actionId.startsWith("asana.task.")) {
+      return await runAsanaAction(userId, actionId, input, policy.provider ?? "asana", {
+        record, proposalId: options.proposalId ?? null,
+        create: deps.createAsanaTask ?? createAsanaTask,
+        update: deps.updateAsanaTask ?? updateAsanaTask,
+        remove: deps.deleteAsanaResource ?? deleteAsanaResource,
+        relationship: deps.mutateAsanaRelationship ?? mutateAsanaRelationship,
+        get: deps.getAsanaResource ?? getAsanaResource,
+        listTasks: deps.listAsanaTasks ?? listAsanaTasks,
+        comment: deps.createAsanaComment ?? (async (u,t,text) => asanaRequest<AsanaResource>(u,"POST",`/tasks/${t}/stories`,{data:{text}})),
+        remember: deps.recordAsanaEntity ?? recordAsanaEntity,
+      });
+    }
+    if(actionId==="asana.portfolio.membership"){
+      const portfolioId=readStr(input,"portfolioId"),itemId=readStr(input,"itemId"),operation=readStr(input,"operation");
+      if(!portfolioId||!itemId||!new Set(["addItem","removeItem"]).has(operation)){const executionId=await record(userId,{proposalId:options.proposalId??null,provider:policy.provider??"asana",actionId,status:"failed",requestSummary:{operation},errorMessage:"invalid_input"});return{ok:false,status:"failed",actionId,provider:policy.provider??"asana",userMessage:"I’m missing the exact Asana portfolio or project.",executionId};}
+      try{const receipt=await(deps.mutateAsanaPortfolioItem??mutateAsanaPortfolioItem)(userId,portfolioId,operation as "addItem"|"removeItem",itemId);if(receipt.accepted!==true||receipt.portfolioGid!==portfolioId||receipt.itemGid!==itemId)throw new AsanaError("malformed_response",200);const items=await(deps.listAsanaChildren??listAsanaChildren)(userId,"portfolios",portfolioId,"items",100),present=items.some(item=>item.gid===itemId);if(present!==(operation==="addItem"))throw new Error("postcondition mismatch");const portfolio=await(deps.getAsanaResource??getAsanaResource)(userId,"portfolios",portfolioId);await(deps.recordAsanaEntity??recordAsanaEntity)(userId,toAsanaContextItem(portfolio),operation);const executionId=await record(userId,{proposalId:options.proposalId??null,provider:policy.provider??"asana",actionId,status:"succeeded",requestSummary:{operation},resultSummary:{portfolioId,itemId,receiptValidated:true,postcondition:"confirmed"}});return{ok:true,status:"succeeded",actionId,provider:policy.provider??"asana",userMessage:operation==="addItem"?"Added that project to the Asana portfolio.":"Removed that project from the Asana portfolio.",executionId,receipt:{asanaResourceIds:[portfolioId,itemId]}};}catch(error){const providerError=error instanceof AsanaError?error:null;const executionId=await record(userId,{proposalId:options.proposalId??null,provider:policy.provider??"asana",actionId,status:"failed",requestSummary:{operation},errorMessage:providerError?.reason??"execution_failed"});return{ok:false,status:"failed",actionId,provider:policy.provider??"asana",userMessage:"I couldn’t verify that Asana portfolio change.",executionId};}
+    }
+    if (/^asana\.(?:project|section|portfolio|goal|time_entry)\.(?:write|delete)$/.test(actionId)) {
+      return await runAsanaResourceAction(userId,actionId,input,policy.provider??"asana",{
+        record,proposalId:options.proposalId??null,
+        create:deps.createAsanaResource??createAsanaResource,
+        update:deps.updateAsanaResource??updateAsanaResource,
+        remove:deps.deleteAsanaResource??deleteAsanaResource,
+        get:deps.getAsanaResource??getAsanaResource,
+        remember:deps.recordAsanaEntity??recordAsanaEntity,
+      });
     }
 
     // Gmail CONVERSATION management (Section 17 correction). Chosen by the presence
@@ -903,6 +952,71 @@ async function runCalendarWrite(
     }
     return await fail(calErr?.reason ?? "execution_failed", userMessage);
   }
+}
+
+async function runAsanaResourceAction(userId:string,actionId:string,input:Record<string,unknown>|undefined,provider:string,deps:{record:typeof recordActionExecution;proposalId:string|null;create:typeof createAsanaResource;update:typeof updateAsanaResource;remove:typeof deleteAsanaResource;get:typeof getAsanaResource;remember:typeof recordAsanaEntity}):Promise<ActionExecutionResult>{
+  const entity=actionId.split(".")[1] as "project"|"section"|"portfolio"|"goal"|"time_entry";const plural={project:"projects",section:"sections",portfolio:"portfolios",goal:"goals",time_entry:"time_tracking_entries"} as const;const kind=plural[entity];const resourceId=readStr(input,"resourceId");const data=input?.data&&typeof input.data==="object"?input.data as Record<string,unknown>:{};const operation=readStr(input,"operation");
+  const fail=async(code:string,message:string)=>{const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"failed",requestSummary:{entity,operation},errorMessage:code});return{ok:false,status:"failed" as const,actionId,provider,userMessage:message,executionId};};
+  try{if(actionId.endsWith(".delete")){if(!resourceId)return fail("invalid_input",`I’m missing the exact Asana ${entity.replace("_"," ")} to delete.`);await deps.remove(userId,kind,resourceId);await deps.remember(userId,{id:resourceId,type:"deleted",title:`Deleted Asana ${entity.replace("_"," ")}`,completed:null,project:null,section:null,due:null,permalink:null},"deleted");const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"succeeded",requestSummary:{entity},resultSummary:{resourceId}});return{ok:true,status:"succeeded",actionId,provider,userMessage:`Deleted that Asana ${entity.replace("_"," ")}.`,executionId,receipt:{asanaResourceIds:[resourceId]}};}
+    let receipt:AsanaReceipt;if(operation==="create")receipt=await deps.create(userId,kind,data,{parentPath:readStr(input,"parentPath")||undefined});else{if(!resourceId)return fail("invalid_input",`I’m missing the exact Asana ${entity.replace("_"," ")} to update.`);receipt=await deps.update(userId,kind,resourceId,data);}if(operation!=="create"&&receipt.gid!==resourceId)throw new AsanaError("malformed_response",200);const observed=await deps.get(userId,kind,receipt.gid);if(observed.gid!==receipt.gid)throw new Error("postcondition mismatch");for(const key of ["name","notes","archived"] as const)if(key in data&&(observed[key]??null)!==(data[key]??null))throw new Error("postcondition mismatch");await deps.remember(userId,toAsanaContextItem(observed),operation);const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"succeeded",requestSummary:{entity,operation},resultSummary:{resourceId:receipt.gid,verified:true}});return{ok:true,status:"succeeded",actionId,provider,userMessage:`${operation==="create"?"Created":"Updated"} “${asanaPlainText(receipt.name) || entity.replace("_"," ")}” in Asana.`,executionId,receipt:{asanaResourceIds:[receipt.gid]}};
+  }catch(error){const e=error instanceof AsanaError?error:null;return fail(e?.reason??"execution_failed",e?.reason==="plan_restricted"?"Asana says that feature isn’t included in your current plan.":e?.reason==="forbidden"?"I don’t have permission to change that Asana resource.":actionId.endsWith(".delete")&&(e?.reason==="timeout"||e?.reason==="network_failure")?"I asked Asana to delete that, but the outcome is unknown. I haven’t tried again.":"I couldn’t make that Asana change.");}}
+
+async function runAsanaAction(
+  userId:string, actionId:string, input:Record<string,unknown>|undefined, provider:string,
+  deps:{record:typeof recordActionExecution;proposalId:string|null;create:typeof createAsanaTask;update:typeof updateAsanaTask;remove:typeof deleteAsanaResource;relationship:typeof mutateAsanaRelationship;get:typeof getAsanaResource;listTasks:typeof listAsanaTasks;comment:(u:string,t:string,text:string)=>Promise<AsanaResource>;remember:typeof recordAsanaEntity},
+):Promise<ActionExecutionResult>{
+  const relationIds=(value:unknown)=>Array.isArray(value)?value.map(item=>item&&typeof item==="object"?(item as Record<string,unknown>).gid:null).filter((id):id is string=>typeof id==="string"):[];
+  const relationVerified=(action:string,relationshipInput:Record<string,unknown>,observed:AsanaResource)=>{const check=(collection:unknown,ids:string[],present:boolean)=>ids.every(id=>relationIds(collection).includes(id)===present);if(action==="addFollowers"||action==="removeFollowers")return check(observed.followers,readStrArray(relationshipInput,"followers"),action==="addFollowers");if(action==="addDependencies"||action==="removeDependencies")return check(observed.dependencies,readStrArray(relationshipInput,"dependencies"),action==="addDependencies");if(action==="addTag"||action==="removeTag")return check(observed.tags,[readStr(relationshipInput,"tag")].filter(Boolean),action==="addTag");if(action==="addProject"||action==="removeProject")return check(observed.projects,[readStr(relationshipInput,"project")].filter(Boolean),action==="addProject");return true;};
+  const ids=readStrArray(input,"taskIds");
+  const fail=async(code:string,message:string,status:ActionExecutionStatusValue="failed")=>{const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status,requestSummary:{taskCount:ids.length,inputKeys:Object.keys(input??{})},errorMessage:code});return{ok:false,status,actionId,provider,userMessage:message,executionId};};
+  const successIds:string[]=[];const failures:string[]=[];
+  try{
+    if(actionId==="asana.task.create"){
+      const receipt=await deps.create(userId,input??{});const observed=await deps.get(userId,"tasks",receipt.gid);const expectedProjects=Array.isArray(input?.projects)?input.projects.filter((value):value is string=>typeof value==="string"):[];const observedProjects=[...(Array.isArray(observed.projects)?observed.projects:[]),...(Array.isArray(observed.memberships)?observed.memberships.map(value=>value&&typeof value==="object"?(value as Record<string,unknown>).project:null):[])].map(value=>value&&typeof value==="object"?(value as Record<string,unknown>).gid:null).filter((value):value is string=>typeof value==="string");const mismatched=typeof observed.gid!=="string"||observed.gid!==receipt.gid||(typeof input?.name==="string"&&observed.name!==input.name)||(typeof input?.notes==="string"&&observed.notes!==input.notes)||(typeof input?.due_at==="string"&&observed.due_at!==input.due_at)||(typeof input?.due_on==="string"&&observed.due_on!==input.due_on)||expectedProjects.some(project=>!observedProjects.includes(project));if(mismatched)return fail("unverified_receipt","Asana accepted the task, but I couldn’t verify every requested field. I haven’t tried again.");
+      await deps.remember(userId,toAsanaContextItem(observed),"created");const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"succeeded",requestSummary:{inputKeys:Object.keys(input??{})},resultSummary:{resourceId:receipt.gid,verified:true}});return{ok:true,status:"succeeded",actionId,provider,userMessage:`Added “${asanaPlainText(receipt.name)||"Untitled"}” to Asana.`,executionId,receipt:{asanaResourceIds:[receipt.gid]}};
+    }
+    if(!ids.length)return fail("invalid_input","I’m missing the exact Asana task to change.");
+    if(actionId==="asana.task.relationship"&&readStr(input,"relationshipAction")==="moveToSection"){
+      const taskId=ids[0]!,relationshipInput=input?.relationshipInput&&typeof input.relationshipInput==="object"?input.relationshipInput as Record<string,unknown>:{};const section=readStr(relationshipInput,"section"),project=readStr(relationshipInput,"project"),sectionName=asanaPlainText(readStr(relationshipInput,"sectionName"))||"that section";if(ids.length!==1||!section||!project)return fail("invalid_input","I’m missing the exact Asana task, project, or section for that move.");
+      try{const before=await deps.get(userId,"tasks",taskId);const memberships=Array.isArray(before.memberships)?before.memberships as Record<string,unknown>[]:[];const alreadyThere=memberships.some(m=>m.section&&typeof m.section==="object"&&(m.section as Record<string,unknown>).gid===section);if(alreadyThere){await deps.remember(userId,toAsanaContextItem(before),"moved");const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"succeeded",requestSummary:{taskCount:1,operation:"move_to_section"},resultSummary:{resourceId:taskId,sectionId:section,alreadyApplied:true}});return{ok:true,status:"succeeded",actionId,provider,userMessage:`That Asana task is already in ${sectionName}.`,executionId,receipt:{asanaResourceIds:[taskId]}};}
+        const relationshipReceipt=await deps.relationship(userId,taskId,"moveToSection",{section,project});if(!("accepted" in relationshipReceipt)||relationshipReceipt.accepted!==true||relationshipReceipt.taskGid!==taskId||relationshipReceipt.sectionGid!==section)throw new AsanaError("malformed_response",200);
+        let postcondition:"confirmed"|"stale"|"unavailable"="unavailable";try{const sectionTasks=await deps.listTasks(userId,{section,count:500});postcondition=sectionTasks.some(task=>task.gid===taskId)?"confirmed":"stale";}catch{}
+        const updatedMemberships=memberships.filter(m=>!(m.project&&typeof m.project==="object"&&(m.project as Record<string,unknown>).gid===project));updatedMemberships.push({project:{gid:project},section:{gid:section,name:sectionName}});await deps.remember(userId,toAsanaContextItem({...before,memberships:updatedMemberships}),"moved");const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"succeeded",requestSummary:{taskCount:1,operation:"move_to_section"},resultSummary:{resourceId:taskId,sectionId:section,receiptValidated:true,postcondition}});return{ok:true,status:"succeeded",actionId,provider,userMessage:`Moved that Asana task to ${sectionName}.`,executionId,receipt:{asanaResourceIds:[taskId]}};
+      }catch(error){const asanaError=error instanceof AsanaError?error:null;const code=asanaError?.reason??"execution_failed";logger.error("asana.operation failed",{operation:"move_to_section",errorCode:code,httpStatus:asanaError?.status??null,endpoint:"sections/{section_gid}/addTask",category:asanaError?"provider":"validation"});const message=code==="invalid_request"?"Asana rejected that section move as invalid. Nothing was reported as moved.":code==="auth_failed"||code==="reconnect_required"?"Asana needs to be reconnected before I can move that task.":code==="forbidden"?"I don’t have permission to move that task into the requested Asana section.":code==="not_found"?"That Asana task or section is no longer accessible.":code==="rate_limited"?"Asana is rate-limiting requests right now, so I didn’t report the task as moved.":code==="timeout"||code==="network_failure"?"I asked Asana to move that task, but the connection dropped before it confirmed. I haven’t tried again.":code==="malformed_response"?"Asana returned an invalid move receipt, so I didn’t report success.":"Asana couldn’t complete that section move.";return fail(code,message,code==="timeout"||code==="network_failure"?"failed":"failed");}
+    }
+    const updateFields=input?.fields&&typeof input.fields==="object"?input.fields as Record<string,unknown>:{};
+    if(actionId==="asana.task.update"&&typeof updateFields.assignee==="string"){
+      if(ids.length!==1)return fail("invalid_input","Assign one Asana task at a time so I can verify the assignee.");
+      const taskId=ids[0]!,assignee=updateFields.assignee;
+      try{
+        const receipt=await deps.update(userId,taskId,{assignee});
+        if(receipt.gid!==taskId)throw new AsanaError("malformed_response",200);
+        const observed=await deps.get(userId,"tasks",taskId);
+        const observedAssignee=observed.assignee&&typeof observed.assignee==="object"?(observed.assignee as Record<string,unknown>).gid:null;
+        if(observed.gid!==taskId||observedAssignee!==assignee)throw new Error("assignment_postcondition_mismatch");
+        await deps.remember(userId,toAsanaContextItem(observed),"assigned");
+        const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:"succeeded",requestSummary:{taskCount:1,operation:"assign_task"},resultSummary:{resourceId:taskId,receiptValidated:true,postcondition:"confirmed"}});
+        return{ok:true,status:"succeeded",actionId,provider,userMessage:"Assigned that Asana task.",executionId,receipt:{asanaResourceIds:[taskId]}};
+      }catch(error){
+        const providerError=error instanceof AsanaError?error:null;const postcondition=error instanceof Error&&error.message==="assignment_postcondition_mismatch";const code=providerError?.reason??(postcondition?"postcondition_mismatch":"execution_failed");
+        logger.error("asana.operation failed",{operation:"assign_task",errorCode:code,httpStatus:providerError?.status??null,endpoint:"tasks/{task_gid}",category:providerError?"provider":postcondition?"verification":"validation"});
+        const message=code==="invalid_request"?"Asana rejected that assignment as invalid. Nothing was reported as assigned.":code==="auth_failed"||code==="reconnect_required"?"Asana needs to be reconnected before I can assign that task.":code==="forbidden"?"I don’t have permission to assign that Asana task.":code==="not_found"?"That Asana task or assignee is no longer accessible.":code==="rate_limited"?"Asana is rate-limiting requests right now, so I didn’t report the task as assigned.":code==="timeout"||code==="network_failure"?"I asked Asana to assign that task, but the connection dropped before it confirmed. I haven’t tried again.":code==="malformed_response"?"Asana returned an invalid assignment receipt, so I didn’t report success.":code==="postcondition_mismatch"?"Asana accepted the assignment, but I couldn’t verify the assignee, so I didn’t report success.":"Asana couldn’t complete that assignment.";
+        return fail(code,message);
+      }
+    }
+    for(const id of ids.slice(0,20)){
+      try{
+        if(actionId==="asana.task.delete"){await deps.remove(userId,"tasks",id);await deps.remember(userId,{id,type:"deleted",title:"Deleted Asana task",completed:null,project:null,section:null,due:null,permalink:null},"deleted");successIds.push(id);continue;}
+        if(actionId==="asana.task.comment"){const body=readStr(input,"text");if(!body)throw new Error("missing comment");const story=await deps.comment(userId,id,body);if(typeof story.gid!=="string"||!story.gid)throw new Error("malformed receipt");const observed=await deps.get(userId,"tasks",id);if(observed.gid!==id)throw new Error("postcondition mismatch");await deps.remember(userId,toAsanaContextItem(observed),"commented");successIds.push(id);continue;}
+        if(actionId==="asana.task.relationship"||actionId==="asana.task.attachUrl"){const action=(actionId==="asana.task.attachUrl"?"attachUrl":readStr(input,"relationshipAction")) as Parameters<typeof mutateAsanaRelationship>[2];const allowed=new Set(["addProject","removeProject","addFollowers","removeFollowers","addDependencies","removeDependencies","addTag","removeTag","attachUrl"]);if(!allowed.has(action))throw new Error("invalid relationship");const relationshipInput=input?.relationshipInput&&typeof input.relationshipInput==="object"?input.relationshipInput as Record<string,unknown>:{};const relationshipReceipt=await deps.relationship(userId,id,action,relationshipInput);if("taskGid" in relationshipReceipt?(relationshipReceipt.taskGid!==id||relationshipReceipt.accepted!==true):action==="attachUrl"?!relationshipReceipt.gid:relationshipReceipt.gid!==id)throw new AsanaError("malformed_response",200);const observed=await deps.get(userId,"tasks",id);if(observed.gid!==id||!relationVerified(action,relationshipInput,observed))throw new Error("postcondition mismatch");await deps.remember(userId,toAsanaContextItem(observed),action);successIds.push(id);continue;}
+        const fields=input?.fields&&typeof input.fields==="object"?input.fields as Record<string,unknown>:{};const receipt=await deps.update(userId,id,fields);const observed=await deps.get(userId,"tasks",id);if(observed.gid!==receipt.gid||receipt.gid!==id)throw new Error("unverified");for(const key of ["name","notes","due_on","due_at","start_on","start_at","completed"] as const){if(!(key in fields))continue;const expected=fields[key]??null,actual=observed[key]??null;if(actual!==expected)throw new Error("postcondition mismatch");}await deps.remember(userId,toAsanaContextItem(observed),"updated");successIds.push(id);
+      }catch{failures.push(id);}
+    }
+    if(!successIds.length)return fail("provider_failure","I couldn’t make that Asana change. Nothing was reported as completed.");
+    const partial=failures.length>0;const executionId=await deps.record(userId,{proposalId:deps.proposalId,provider,actionId,status:partial?"failed":"succeeded",requestSummary:{taskCount:ids.length},resultSummary:{succeeded:successIds.length,failed:failures.length}});
+    const verb=actionId.endsWith("delete")?"Deleted":actionId.endsWith("comment")?"Commented on":"Updated";
+    return{ok:!partial,status:partial?"failed":"succeeded",actionId,provider,userMessage:partial?`${verb} ${successIds.length} of ${ids.length} Asana tasks. ${failures.length} failed.`:`${verb} ${successIds.length===1?"that Asana task":`${successIds.length} Asana tasks`}.`,executionId,receipt:{asanaResourceIds:successIds}};
+  }catch(error){const e=error instanceof AsanaError?error:null;const message=e?.reason==="not_connected"?"Your Asana isn’t connected.":e?.reason==="plan_restricted"?"Asana says that feature isn’t included in your current plan.":e?.reason==="forbidden"?"I don’t have permission to make that Asana change.":e&&(e.reason==="timeout"||e.reason==="network_failure")&&actionId.endsWith("delete")?"I asked Asana to delete that, but the connection dropped before it confirmed. I haven’t tried again.":"I couldn’t reach Asana to make that change.";return fail(e?.reason??"execution_failed",message);}
 }
 
 /** Honest replies for the Todoist executor (never leak provider detail). */

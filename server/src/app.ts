@@ -1,5 +1,7 @@
 import express, { type Express } from "express";
 
+import { asanaRouter } from "./routes/asana";
+
 import { gmailRouter } from "./routes/gmail";
 import { googleCalendarRouter } from "./routes/googleCalendar";
 import { healthRouter } from "./routes/health";
@@ -26,6 +28,7 @@ export function createApp(): Express {
   app.use(googleCalendarRouter);
   app.use(gmailRouter);
   app.use(todoistRouter);
+  app.use(asanaRouter);
   app.use(meRouter);
   app.use(sendblueWebhookRouter);
 

@@ -47,6 +47,7 @@ import { listRecentProposalsByAction, type ActionProposalView } from "./proposal
  */
 export type EntityKind =
   | "todoist_task"
+  | "asana_task"
   | "gmail_email"
   | "gmail_draft"
   | "calendar_event"
@@ -61,6 +62,8 @@ export type EntityKind =
  * happen. The ids are a stable storage contract, and the tests pin them.
  */
 export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" }[] = [
+  { actionId: "asana.lastSelection", kind: "asana_task" },
+  { actionId: "asana.entityContext", kind: "asana_task" },
   { actionId: "todoist.lastSelection", kind: "todoist_task" },
   { actionId: "todoist.entityContext", kind: "todoist_task" },
   { actionId: "calendar.lastSelection", kind: "calendar_event" },
@@ -111,8 +114,11 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
   if (!t) return [];
   const kinds = new Set<EntityKind>();
 
-  // Todoist: task-app nouns and lifecycle states.
-  if (
+  // An explicit provider name wins over generic task nouns.
+  if (/\basana\b/.test(t)) {
+    kinds.add("asana_task");
+  }
+  if (!/\basana\b/.test(t) && (
     /\bpriority\b/.test(t) ||
     /\btasks?\b/.test(t) ||
     /\bto-?dos?\b/.test(t) ||
@@ -120,10 +126,8 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
     /\bsections?\b/.test(t) ||
     /\blabels?\b/.test(t) ||
     /\btodoist\b/.test(t) ||
-    /\bcomplete[ds]?\b/.test(t) ||
-    /\breopen\b/.test(t) ||
     /\boverdue\b/.test(t)
-  ) {
+  )) {
     kinds.add("todoist_task");
   }
 
@@ -271,6 +275,7 @@ export type FollowupOwner =
 export function conflictClarification(kinds: readonly EntityKind[]): string {
   const label: Record<EntityKind, string> = {
     todoist_task: "a Todoist task",
+    asana_task: "an Asana task",
     gmail_email: "an email",
     gmail_draft: "an email draft",
     calendar_event: "a calendar event",
@@ -320,5 +325,16 @@ export async function resolveFollowupOwner(
   const contexts = await loadGroundedContexts(userId, deps);
   const newest = contexts[0];
   if (!newest) return { kind: "none" };
+  // Two provider contexts stamped at the same instant carry no defensible
+  // recency ordering. This can happen when parallel lists are shown/recorded;
+  // choosing either task provider would be a guess, so ask and write nothing.
+  const equallyRecent = contexts.filter((context) => context.at === newest.at);
+  const equallyRecentFamilies = toProviderFamilies(equallyRecent.map((context) => context.kind));
+  if (equallyRecentFamilies.length > 1) {
+    return {
+      kind: "conflict",
+      clarification: conflictClarification(equallyRecent.map((context) => context.kind)),
+    };
+  }
   return { kind: "owner", owner: newest.kind, reason: "context" };
 }

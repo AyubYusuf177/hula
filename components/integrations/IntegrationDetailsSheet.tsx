@@ -27,7 +27,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { hula } from '@/constants/theme';
-import type { IntegrationProviderConfig } from '@/data/integrations';
+import { authorizationRedirectCopy, type IntegrationProviderConfig } from '@/data/integrations';
 import { deriveSheetCopy, type IntegrationView } from '@/lib/integrationStatus';
 
 const font = hula.typography.fontFamily;
@@ -237,7 +237,7 @@ export function IntegrationDetailsSheet({
                         <ActivityIndicator color={hula.button.solidText} />
                       ) : (
                         <>
-                          <Ionicons name="logo-google" size={18} color={hula.button.solidText} />
+                          <Image source={provider.iconImage} className="h-[18px] w-[18px]" contentFit="contain" />
                           <Text style={styles.connectText}>{provider.connectLabel}</Text>
                         </>
                       )}
@@ -249,7 +249,7 @@ export function IntegrationDetailsSheet({
                         color={hula.colors.text.tertiary}
                       />
                       <Text style={styles.redirectText}>
-                        You’ll be redirected to Google to authorize access.
+                        {authorizationRedirectCopy(provider)}
                       </Text>
                     </View>
                   </>

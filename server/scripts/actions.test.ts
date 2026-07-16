@@ -132,12 +132,22 @@ check("registry: every action has complete, typed metadata", () => {
   }
 });
 
-check("registry: implemented actions are the calendar/Gmail/Todoist adapters", () => {
+check("registry: implemented actions are the calendar/Gmail/Todoist/Asana adapters", () => {
   const implemented = ACTION_DEFINITIONS.filter((a) => a.implemented).map((a) => a.actionId);
   // Section 16 added real Gmail draft creation + send to the Section 11 calendar
   // reads; Section 17 adds the confirmation-gated calendar event writes; Section 19
   // adds the Todoist task lifecycle.
   assert.deepEqual(implemented.sort(), [
+    "asana.portfolio.membership",
+    "asana.portfolio.write",
+    "asana.project.delete",
+    "asana.project.write",
+    "asana.task.attachUrl",
+    "asana.task.comment",
+    "asana.task.create",
+    "asana.task.delete",
+    "asana.task.relationship",
+    "asana.task.update",
     "calendar.cancelEvent",
     "calendar.createEvent",
     "calendar.findNextEvent",
@@ -180,6 +190,13 @@ check("registry: no implemented action still carries stale 'not enabled yet' cop
       `${a.actionId} is implemented but its copy claims it is not enabled`,
     );
   }
+});
+
+check("registry: Asana actions without current named OAuth scopes are disabled", () => {
+  for (const actionId of ["asana.section.write","asana.section.delete","asana.goal.write","asana.goal.delete","asana.portfolio.delete","asana.time_entry.write","asana.time_entry.delete"]) {
+    const action=getActionDefinition(actionId);assert.ok(action,actionId);assert.equal(action?.implemented,false,actionId);assert.deepEqual(action?.requiredScopes,[],actionId);assert.match(action?.userFacingDescription??"",/named OAuth scopes do not authorise/i);
+  }
+  assert.deepEqual(getActionDefinition("asana.task.attachUrl")?.requiredScopes,["attachments:write"]);
 });
 
 check("registry: draft delete requires confirmation; draft edit does not", () => {
@@ -263,6 +280,9 @@ check("registry: the `modify` rung is only used for reversible, non-external act
     "task.move",
     "task.complete",
     "task.reopen",
+    "asana.task.create",
+    "asana.task.update",
+    "asana.task.relationship",
   ]);
   for (const a of ACTION_DEFINITIONS) {
     if (a.riskLevel !== "modify") continue;

@@ -25,6 +25,8 @@ import {
   handleTodoistWrite,
 } from "../integrations/providers/todoist/todoistActions";
 import { handleTodoistRead } from "../integrations/providers/todoist/todoistReads";
+import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
+import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleTransportKeyword } from "../channels/transportKeywords";
 import { handleEntityFollowup } from "./entityFollowup";
 import { handleMemoryCommand } from "../users/memory";
@@ -82,6 +84,8 @@ export interface InboundRouterDeps {
   todoistUndo?: Handler;
   todoistWrite?: Handler;
   todoistRead?: Handler;
+  asanaWrite?: Handler;
+  asanaRead?: Handler;
   pendingReprompt?: (userId: string) => Promise<HandlerResult>;
 }
 
@@ -179,6 +183,10 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     // Cross-provider follow-up arbitration. See the header note: cascade ORDER
     // cannot decide who owns "the second one" — only the last grounded list can.
     { name: "entityFollowup", run: deps.entityFollowup ?? handleEntityFollowup },
+    // Asana is gated by typed provider extraction. It must run before Todoist so
+    // an explicitly named Asana task cannot be claimed by Todoist's task nouns.
+    { name: "asanaWrite", run: deps.asanaWrite ?? handleAsanaWrite },
+    { name: "asanaRead", run: deps.asanaRead ?? handleAsanaRead },
     { name: "gmailClarify", run: deps.gmailClarify ?? handleGmailClarification },
     { name: "gmailDraftFollowup", run: deps.gmailDraftFollowup ?? handleGmailDraftFollowup },
     { name: "gmailDraftLifecycle", run: deps.gmailDraftLifecycle ?? handleGmailDraftLifecycle },

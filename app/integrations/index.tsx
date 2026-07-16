@@ -28,13 +28,17 @@ import {
 } from '@/data/integrations';
 import {
   connectGmail,
+  connectAsana,
   connectGoogleCalendar,
   connectTodoist,
   disconnectGmail,
+  disconnectAsana,
   disconnectGoogleCalendar,
   disconnectTodoist,
   fetchUserIntegrations,
   GMAIL_PROVIDER,
+  ASANA_PROVIDER,
+  AsanaNotConfiguredError,
   GmailNotConfiguredError,
   GOOGLE_CALENDAR_PROVIDER,
   GoogleCalendarNotConfiguredError,
@@ -84,6 +88,7 @@ const CONNECT_STARTERS: Record<string, ConnectStarter | undefined> = {
     connectGoogleCalendar(token, { appReturnUrl }),
   [GMAIL_PROVIDER]: (token, appReturnUrl) => connectGmail(token, { appReturnUrl }),
   [TODOIST_PROVIDER]: (token, appReturnUrl) => connectTodoist(token, { appReturnUrl }),
+  [ASANA_PROVIDER]: (token, appReturnUrl) => connectAsana(token, { appReturnUrl }),
 };
 
 const DISCONNECTERS: Record<
@@ -93,6 +98,7 @@ const DISCONNECTERS: Record<
   [GOOGLE_CALENDAR_PROVIDER]: disconnectGoogleCalendar,
   [GMAIL_PROVIDER]: disconnectGmail,
   [TODOIST_PROVIDER]: disconnectTodoist,
+  [ASANA_PROVIDER]: disconnectAsana,
 };
 
 type StatusMap = Record<string, IntegrationStatus | null>;
@@ -289,6 +295,7 @@ export default function IntegrationsScreen() {
         err instanceof GoogleCalendarNotConfiguredError ||
         err instanceof GmailNotConfiguredError ||
         err instanceof TodoistNotConfiguredError
+        || err instanceof AsanaNotConfiguredError
           ? 'This connection isn’t available yet. Please try again later.'
           : err instanceof MissingApiUrlError
             ? 'Hula backend URL is not configured.'

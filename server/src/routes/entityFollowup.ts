@@ -1,4 +1,6 @@
 import { handleTodoistWrite } from "../integrations/providers/todoist/todoistActions";
+import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
+import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
 import { logger } from "../utils/logger";
 import {
   isDestructiveFollowup,
@@ -37,6 +39,8 @@ export interface HandlerResult {
 export interface EntityFollowupDeps extends ArbiterDeps {
   resolveOwner?: typeof resolveFollowupOwner;
   todoistWrite?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  asanaWrite?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  asanaRead?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
 }
 
 /**
@@ -91,6 +95,15 @@ export async function handleEntityFollowup(
     // the wrong provider, so Hula asks — and mutates nothing.
     logger.info("entityFollowup conflict", { source: "arbiter" });
     return { handled: true, reply: owner.clarification };
+  }
+
+  if (owner.owner === "asana_task") {
+    logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+    const asanaRead = deps.asanaRead ?? ((u, t) => handleAsanaRead(u, t, { arbitrated: true }));
+    const readResult = await asanaRead(userId, text);
+    if (readResult.handled) return readResult;
+    const asanaWrite = deps.asanaWrite ?? ((u, t) => handleAsanaWrite(u, t, { arbitrated: true }));
+    return asanaWrite(userId, text);
   }
 
   if (owner.owner !== "todoist_task") {

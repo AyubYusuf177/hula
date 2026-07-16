@@ -13,7 +13,7 @@
 import type { ImageSourcePropType } from 'react-native';
 
 import { integrationIcons } from '@/constants/images';
-import { GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER, TODOIST_PROVIDER } from '@/lib/hulaApi';
+import { ASANA_PROVIDER, GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER, TODOIST_PROVIDER } from '@/lib/hulaApi';
 
 /** A display category grouping on the Integrations screen. */
 export type IntegrationCategoryId = 'ORGANIZATION';
@@ -40,6 +40,8 @@ export interface IntegrationProviderConfig {
   connectedBody: string;
   /** Primary connect button label. */
   connectLabel: string;
+  /** Brand named in the OAuth redirect disclosure. Required to prevent provider-copy drift. */
+  authorizationProviderLabel: string;
   /** Label once connected. */
   disconnectLabel: string;
 }
@@ -63,6 +65,7 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     connectedBody:
       'Hula can read your schedule and answer calendar questions from iMessage. Read-only — it never changes your calendar.',
     connectLabel: 'Connect Google',
+    authorizationProviderLabel: 'Google',
     disconnectLabel: 'Disconnect Google Calendar',
   },
   {
@@ -79,6 +82,7 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     connectedBody:
       'Hula can read and search your inbox to answer email questions from iMessage. Read-only — it never sends, deletes or changes your email.',
     connectLabel: 'Connect Gmail',
+    authorizationProviderLabel: 'Google',
     disconnectLabel: 'Disconnect Gmail',
   },
   {
@@ -99,7 +103,23 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     connectedBody:
       'Hula can read your tasks and add, edit, reschedule, move, complete and reopen them from iMessage. Deleting a task, or changing several at once, always asks you first.',
     connectLabel: 'Connect Todoist',
+    authorizationProviderLabel: 'Todoist',
     disconnectLabel: 'Disconnect Todoist',
+  },
+  {
+    id: ASANA_PROVIDER,
+    displayName: 'Asana',
+    category: 'ORGANIZATION',
+    iconImage: integrationIcons.asana,
+    accent: '#F06A6A',
+    summary: 'Reads and safely manages your team’s work from iMessage.',
+    sheetHeading: 'Asana',
+    connectedHeading: 'Asana',
+    sheetBody: 'Connect Asana to find your work and safely manage tasks, projects and portfolios from iMessage. Hula asks before changes that notify people or can’t be undone.',
+    connectedBody: 'Hula can find and manage authorised Asana work from iMessage. Goals and logged time are view-only, and Hula asks before shared or permanent changes.',
+    connectLabel: 'Connect Asana',
+    authorizationProviderLabel: 'Asana',
+    disconnectLabel: 'Disconnect Asana',
   },
 ] as const;
 
@@ -109,6 +129,10 @@ export function getIntegrationProvider(
 ): IntegrationProviderConfig | undefined {
   return INTEGRATION_PROVIDERS.find((p) => p.id === id);
 }
+
+/** Provider-owned OAuth disclosure; never hardcode one provider in the shared sheet. */
+export const authorizationRedirectCopy = (provider: IntegrationProviderConfig): string =>
+  `You’ll be redirected to ${provider.authorizationProviderLabel} to authorize access.`;
 
 /** Providers grouped by category, preserving catalog order. */
 export function integrationsByCategory(): {

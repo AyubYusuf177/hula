@@ -6,6 +6,7 @@ import favicon from '@/assets/images/favicon.png';
 import googleCalendar from '@/assets/images/integrations/google-calendar.png';
 import gmail from '@/assets/images/integrations/gmail.png';
 import todoist from '@/assets/images/integrations/todoist.png';
+import asana from '@/assets/images/integrations/asana.png';
 
 export const images = {
   hulaLogo,
@@ -25,4 +26,7 @@ export const integrationIcons = {
   // todoist-logo.zip → Icon/Color.png), resampled 1000px → 512px to match the
   // other product icons. Not redrawn or recoloured.
   todoist,
+  // Current official Asana square logo, downloaded unmodified from Asana's
+  // official brand asset CDN.
+  asana,
 } as const;
