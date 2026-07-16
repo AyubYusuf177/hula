@@ -12,4 +12,3 @@ export interface NotionList<T extends NotionObject = NotionObject> {
 export type NotionCapability =
   | "content.read" | "content.write" | "users.read"
   | "comments.read" | "comments.write" | "files.read" | "files.write";
-
