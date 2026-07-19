@@ -1,0 +1,65 @@
+_metadata:
+  major_version: 2
+display_information:
+  name: Hula
+  description: Work with your Slack workspace safely from Hula messages.
+  background_color: "#080A16"
+features:
+  bot_user:
+    display_name: Hula
+    always_online: false
+oauth_config:
+  redirect_urls:
+    - <BACKEND_BASE_URL>/v1/integrations/slack/callback
+  scopes:
+    bot:
+      - app_mentions:read
+      - bookmarks:read
+      - bookmarks:write
+      - channels:history
+      - channels:join
+      - channels:manage
+      - channels:read
+      - chat:write
+      - emoji:read
+      - files:read
+      - files:write
+      - groups:history
+      - groups:read
+      - groups:write
+      - im:history
+      - im:read
+      - im:write
+      - mpim:history
+      - mpim:read
+      - pins:read
+      - pins:write
+      - reactions:read
+      - reactions:write
+      - team:read
+      - usergroups:read
+      - usergroups:write
+      - users.profile:read
+      - users:read
+      - users:read.email
+    user:
+      - channels:history
+      - groups:history
+      - search:read
+settings:
+  event_subscriptions:
+    request_url: <BACKEND_BASE_URL>/v1/integrations/slack/events
+    bot_events:
+      - app_mention
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: true
+# Replace <BACKEND_BASE_URL> with the public HTTPS backend origin. Never place
+# client secrets, signing secrets, access tokens, refresh tokens, or user data here.
+# Enabling token rotation makes Slack issue expiring access and rotating refresh
+# tokens. Hula persists rotated credentials before a single bounded retry.
+# For this undistributed development app, the backend may set
+# SLACK_DEVELOPMENT_TEAM_ID=T… to add Slack's documented OAuth `team` hint.
+# Remove that variable when enabling multi-workspace distribution.

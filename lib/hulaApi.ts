@@ -677,6 +677,47 @@ export async function connectNotion(token:string,params:{appReturnUrl?:string}={
 export const fetchNotionStatus=(token:string)=>fetchIntegrationStatus(token,NOTION_PROVIDER);
 export const disconnectNotion=(token:string)=>disconnectIntegration(token,NOTION_PROVIDER);
 
+// --- Slack (Section 22) -------------------------------------------------
+export const SLACK_PROVIDER = 'slack';
+export class SlackNotConfiguredError extends Error {
+  constructor() {
+    super('Slack connect is not configured on the Hula backend yet.');
+    this.name = 'SlackNotConfiguredError';
+  }
+}
+export class SlackConnectError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = 'SlackConnectError';
+  }
+}
+export async function connectSlack(
+  token: string,
+  params: { appReturnUrl?: string } = {},
+): Promise<{ provider: string; authorizationUrl: string; expiresAt: string }> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+  const res = await fetch(`${BASE_URL}/v1/me/integrations/${SLACK_PROVIDER}/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(params.appReturnUrl ? { appReturnUrl: params.appReturnUrl } : {}),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: unknown };
+    const code = typeof body.error === 'string' ? body.error : `http_${res.status}`;
+    if (code === 'slack_not_configured') throw new SlackNotConfiguredError();
+    throw new SlackConnectError(code);
+  }
+  const data = await res.json() as {
+    provider: string;
+    authorizationUrl?: string;
+    expiresAt: string;
+  };
+  if (!data.authorizationUrl) throw new Error('slack/connect returned no authorization URL');
+  return data as { provider: string; authorizationUrl: string; expiresAt: string };
+}
+export const fetchSlackStatus = (token: string) => fetchIntegrationStatus(token, SLACK_PROVIDER);
+export const disconnectSlack = (token: string) => disconnectIntegration(token, SLACK_PROVIDER);
+
 /** A single safe, normalized Gmail message (metadata + snippet only, no body). */
 export interface GmailMessage {
   id: string;

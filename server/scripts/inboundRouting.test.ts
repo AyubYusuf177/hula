@@ -19,6 +19,9 @@ import type { ActionPolicyContext } from "../src/actions/policy";
 import type { ActionProposalView } from "../src/actions/proposals";
 import type { GmailSelectionData, LoadedGmailSelection } from "../src/integrations/providers/gmail/gmailSelection";
 import type { NormalizedGmailMessage } from "../src/integrations/providers/gmail/types";
+import { handleSlackConversation } from "../src/integrations/providers/slack/conversation";
+import { slackOps } from "../src/integrations/providers/slack/operations";
+import { handleEntityFollowup } from "../src/routes/entityFollowup";
 
 /**
  * END-TO-END inbound ROUTING tests (Section 17 real-device fix).
@@ -117,6 +120,10 @@ function router(over: InboundRouterDeps = {}): InboundRouterDeps {
     todoistUndo: decline,
     todoistWrite: decline,
     todoistRead: decline,
+    asanaWrite: decline,
+    asanaRead: decline,
+    notion: decline,
+    slack: decline,
     pendingReprompt: decline,
     ...over,
   };
@@ -267,6 +274,8 @@ check("order: the cascade order is pinned", () => {
     // handler ORDER can decide that, so the highest handler would otherwise win
     // every ambiguous pronoun forever.
     "entityFollowup",
+    // Section 22: explicit Slack nouns and #channels win before document/task providers.
+    "slack",
     // Section 21: explicit and context-owned Notion content is extracted before
     // task providers; its semantic provider gate declines their domains.
     "notion",
@@ -1125,6 +1134,196 @@ asyncCheck("preserved: the Calendar confirmation flow still works end to end", a
   assert.equal(r?.source, "confirmation");
   assert.equal(created, 1, "the confirmed calendar write must still execute exactly once");
   assert.ok(/scheduled/i.test(r!.reply), r!.reply);
+});
+
+asyncCheck("Slack live path: natural workspace question reaches users.list without clarification", async () => {
+  let usersCalls = 0;
+  const deps = router({
+    slack: (userId, text) => handleSlackConversation(userId, text, {
+      ops: {
+        ...slackOps,
+        identity: async () => ({ ok: true, team: "Acme", user_id: "UBOT" }),
+        users: async () => {
+          usersCalls += 1;
+          return [{ id: "U1", real_name: "Sarah Jones" }];
+        },
+      },
+      generate: async (request) => {
+        assert.equal(request.messages[0]?.content, "Who is in my Slack workspace?");
+        return JSON.stringify({ provider: "slack", operation: "list_users", targetType: "workspace", needsClarification: true });
+      },
+      rememberSelection: async () => undefined,
+    }),
+  });
+  const result = await routeInboundText(USER, "Who is in my Slack workspace?", deps);
+  assert.equal(result?.source, "slack");
+  assert.equal(usersCalls, 1);
+  assert(result?.reply.includes("Sarah Jones"));
+  assert(!result?.reply.includes("missing a clear target"));
+});
+
+asyncCheck("Slack live write: quoted channel post wins routing and creates only a proposal", async () => {
+  let todoistCalls = 0;
+  let writes = 0;
+  let proposal: Record<string, unknown> | undefined;
+  const deps = router({
+    todoistWrite: async () => { todoistCalls += 1; return { handled: false }; },
+    slack: (userId, text) => handleSlackConversation(userId, text, {
+      ops: {
+        ...slackOps,
+        identity: async () => ({ ok: true, team: "Acme", user_id: "UBOT" }),
+        channels: async () => [{ id: "C22", name: "all-hula", is_channel: true, is_member: true }],
+        write: async () => { writes += 1; return { ok: true }; },
+      },
+      generate: async () => "malformed model output",
+      propose: async (_user, value) => { proposal = value as unknown as Record<string, unknown>; return {} as never; },
+    }),
+  });
+  const result = await routeInboundText(USER, 'Post "Section 22 live test" in all-hula.', deps);
+  assert.equal(result?.source, "slack");
+  assert.equal(todoistCalls, 0);
+  assert.equal(writes, 0);
+  const input = proposal?.input as Record<string, unknown>;
+  assert.equal(input.method, "chat.postMessage");
+  assert.deepEqual(input.params, { channel: "C22", text: "Section 22 live test" });
+  assert(result?.reply.includes("Reply Yes to confirm"));
+});
+
+asyncCheck("Slack production follow-up route preserves a message across channel then author projections", async () => {
+  const selected = {
+    type: "message" as const,
+    id: "171.0001",
+    ts: "171.0001",
+    threadTs: "171.0001",
+    channelId: "C22",
+    channelName: "all-hula",
+    userId: "UBOT",
+    label: "unique seeded marker",
+    workspaceName: "Acme",
+    expiresAt: "2026-07-19T00:00:00Z",
+  };
+  const slack = (userId: string, text: string | undefined) => handleSlackConversation(userId, text, {
+    arbitrated: true,
+    ops: {
+      ...slackOps,
+      identity: async () => ({ ok: true, team: "Acme", user_id: "UBOT" }),
+      users: async () => [{ id: "UBOT", real_name: "Hula", is_bot: true }],
+    },
+    generate: async () => JSON.stringify(text?.toLowerCase().includes("channel")
+      ? { provider: "slack", operation: "channel_info", targetType: "message", messageReference: "that message", unresolvedReference: true }
+      : { provider: "slack", operation: "lookup_user", targetType: "message", messageReference: "that message", unresolvedReference: true }),
+    resolveEntity: async () => selected,
+    rememberEntity: async () => undefined,
+  });
+  const deps = router({
+    entityFollowup: (userId, text) => handleEntityFollowup(userId, text, {
+      resolveOwner: async () => ({ kind: "owner", owner: "slack_entity", reason: "context" }),
+      slack,
+    }),
+  });
+  const channel = await routeInboundText(USER, "Which channel was that message in?", deps);
+  const author = await routeInboundText(USER, "Who wrote that message?", deps);
+  assert.equal(channel?.source, "entityFollowup");
+  assert(channel?.reply.includes("#all-hula"));
+  assert.equal(author?.source, "entityFollowup");
+  assert(author?.reply.includes("Hula"));
+});
+
+asyncCheck("Slack production thread channel follow-up resolves through the grounded reply entity", async () => {
+  let entityResolutions = 0;
+  let channelInfoCalls = 0;
+  const reply = {
+    type: "message" as const,
+    id: "171.1001",
+    ts: "171.1001",
+    threadTs: "171.1000",
+    channelId: "C22",
+    channelName: "all-hula",
+    userId: "UAYUB",
+    label: "grounded thread reply",
+    workspaceName: "Acme",
+    expiresAt: "2026-07-19T00:00:00Z",
+  };
+  const slack = (userId: string, text: string | undefined) => handleSlackConversation(userId, text, {
+    arbitrated: true,
+    ops: {
+      ...slackOps,
+      identity: async () => ({ ok: true, team: "Acme", user_id: "UBOT" }),
+      channelInfo: async () => { channelInfoCalls += 1; return { ok: true }; },
+    },
+    generate: async () => JSON.stringify({
+      provider: "slack",
+      operation: "channel_info",
+      targetType: "thread",
+      messageReference: "that thread",
+      unresolvedReference: true,
+    }),
+    resolveEntity: async (_resolvedUserId, options) => {
+      entityResolutions += 1;
+      assert.equal(options?.type, "message");
+      return reply;
+    },
+    rememberEntity: async () => undefined,
+  });
+  const deps = router({
+    entityFollowup: (userId, text) => handleEntityFollowup(userId, text, {
+      resolveOwner: async () => ({ kind: "owner", owner: "slack_entity", reason: "context" }),
+      slack,
+    }),
+  });
+
+  const result = await routeInboundText(USER, "Which channel is that thread in?", deps);
+  assert.equal(result?.source, "entityFollowup");
+  assert(result?.reply.includes("#all-hula"));
+  assert.equal(entityResolutions, 1);
+  assert.equal(channelInfoCalls, 0);
+});
+
+asyncCheck("Slack production route rejects a model read-thread operation for a clear message-channel attribute", async () => {
+  let replyCalls = 0;
+  const selected = {
+    type: "message" as const,
+    id: "200.000",
+    ts: "200.000",
+    threadTs: "200.000",
+    channelId: "C22",
+    channelName: "all-hula",
+    userId: "UBOT",
+    label: "new searched message",
+    workspaceName: "Acme",
+    expiresAt: "2026-07-19T00:00:00Z",
+  };
+  const slack = (userId: string, text: string | undefined) => handleSlackConversation(userId, text, {
+    arbitrated: true,
+    ops: {
+      ...slackOps,
+      identity: async () => ({ ok: true, team: "Acme", user_id: "UBOT" }),
+      replies: async () => { replyCalls += 1; return []; },
+      channelInfo: async () => { throw new Error("grounded message provenance must avoid conversations.info"); },
+    },
+    // This is the exact operation mismatch observed in the live server log.
+    generate: async () => JSON.stringify({
+      provider: "slack",
+      operation: "read_thread",
+      targetType: "message",
+      messageReference: "that message",
+      unresolvedReference: true,
+    }),
+    resolveEntity: async () => selected,
+    rememberEntity: async () => undefined,
+  });
+  const deps = router({
+    entityFollowup: (userId, text) => handleEntityFollowup(userId, text, {
+      resolveOwner: async () => ({ kind: "owner", owner: "slack_entity", reason: "context" }),
+      slack,
+    }),
+  });
+
+  const result = await routeInboundText(USER, "Which channel was that message in?", deps);
+  assert.equal(result?.source, "entityFollowup");
+  assert(result?.reply.includes("#all-hula"));
+  assert(!result?.reply.includes("Slack thread"));
+  assert.equal(replyCalls, 0);
 });
 
 async function run(): Promise<void> {

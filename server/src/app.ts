@@ -10,6 +10,7 @@ import { linkSessionsRouter } from "./routes/linkSessions";
 import { meRouter } from "./routes/me";
 import { todoistRouter } from "./routes/todoist";
 import { sendblueWebhookRouter } from "./routes/webhooks";
+import { slackEventsRouter, slackRouter } from "./routes/slack";
 
 /**
  * Builds the Express application. Kept separate from `index.ts` so the app can
@@ -17,7 +18,7 @@ import { sendblueWebhookRouter } from "./routes/webhooks";
  */
 export function createApp(): Express {
   const app = express();
-
+  app.use(slackEventsRouter);
   app.use(express.json());
 
   // Routes
@@ -31,6 +32,7 @@ export function createApp(): Express {
   app.use(todoistRouter);
   app.use(asanaRouter);
   app.use(notionRouter);
+  app.use(slackRouter);
   app.use(meRouter);
   app.use(sendblueWebhookRouter);
 

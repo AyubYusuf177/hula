@@ -169,6 +169,8 @@ check("registry: implemented actions include the Notion adapter", () => {
     "email.untrash",
     "email.updateDraft",
     "notion.mutate",
+    "slack.mutate",
+    "slack.postMessage",
     "task.complete",
     "task.create",
     "task.delete",

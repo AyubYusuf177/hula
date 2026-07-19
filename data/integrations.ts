@@ -13,7 +13,14 @@
 import type { ImageSourcePropType } from 'react-native';
 
 import { integrationIcons } from '@/constants/images';
-import { ASANA_PROVIDER, GMAIL_PROVIDER, GOOGLE_CALENDAR_PROVIDER, NOTION_PROVIDER, TODOIST_PROVIDER } from '@/lib/hulaApi';
+import {
+  ASANA_PROVIDER,
+  GMAIL_PROVIDER,
+  GOOGLE_CALENDAR_PROVIDER,
+  NOTION_PROVIDER,
+  SLACK_PROVIDER,
+  TODOIST_PROVIDER,
+} from '@/lib/hulaApi';
 
 /** A display category grouping on the Integrations screen. */
 export type IntegrationCategoryId = 'ORGANIZATION';
@@ -135,6 +142,23 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     connectLabel: 'Connect Notion',
     authorizationProviderLabel: 'Notion',
     disconnectLabel: 'Disconnect Notion',
+  },
+  {
+    id: SLACK_PROVIDER,
+    displayName: 'Slack',
+    category: 'ORGANIZATION',
+    iconImage: integrationIcons.slack,
+    accent: '#4A154B',
+    summary: 'Reads and safely manages granted Slack workspaces from iMessage.',
+    sheetHeading: 'Slack',
+    connectedHeading: 'Slack',
+    sheetBody:
+      'Connect Slack to find conversations, people, threads and file details, and safely manage messages and workspace content from iMessage. File upload and deletion are not available. Hula only sees workspaces and content granted during installation. Permission changes may require reinstalling.',
+    connectedBody:
+      'Hula can work with content visible to this Slack installation. Search and channel-thread replies depend on user permissions; file upload and deletion are not available. Shared and externally visible changes always ask first. Changed permissions require reinstalling Slack.',
+    connectLabel: 'Connect Slack',
+    authorizationProviderLabel: 'Slack',
+    disconnectLabel: 'Disconnect Slack',
   },
 ] as const;
 

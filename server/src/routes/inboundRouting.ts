@@ -28,6 +28,7 @@ import { handleTodoistRead } from "../integrations/providers/todoist/todoistRead
 import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
 import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleNotionConversation } from "../integrations/providers/notion/conversation";
+import { handleSlackConversation } from "../integrations/providers/slack/conversation";
 import { handleTransportKeyword } from "../channels/transportKeywords";
 import { handleEntityFollowup } from "./entityFollowup";
 import { handleMemoryCommand } from "../users/memory";
@@ -88,6 +89,7 @@ export interface InboundRouterDeps {
   asanaWrite?: Handler;
   asanaRead?: Handler;
   notion?: Handler;
+  slack?: Handler;
   pendingReprompt?: (userId: string) => Promise<HandlerResult>;
 }
 
@@ -185,6 +187,7 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     // Cross-provider follow-up arbitration. See the header note: cascade ORDER
     // cannot decide who owns "the second one" — only the last grounded list can.
     { name: "entityFollowup", run: deps.entityFollowup ?? handleEntityFollowup },
+    { name: "slack", run: deps.slack ?? handleSlackConversation },
     // Explicit Notion and Notion-owned follow-ups run before task providers. Its
     // semantic extractor declines Todoist, Asana, mail, calendar and reminders.
     { name: "notion", run: deps.notion ?? handleNotionConversation },

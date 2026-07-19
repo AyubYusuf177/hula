@@ -2,6 +2,7 @@ import { handleTodoistWrite } from "../integrations/providers/todoist/todoistAct
 import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
 import { handleNotionConversation } from "../integrations/providers/notion/conversation";
+import { handleSlackConversation } from "../integrations/providers/slack/conversation";
 import { logger } from "../utils/logger";
 import {
   isDestructiveFollowup,
@@ -43,6 +44,7 @@ export interface EntityFollowupDeps extends ArbiterDeps {
   asanaWrite?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   asanaRead?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   notion?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  slack?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
 }
 
 /**
@@ -110,6 +112,10 @@ export async function handleEntityFollowup(
   if(owner.owner==="notion_entity"){
     logger.info("entityFollowup routed",{owner:owner.owner,reason:owner.reason});
     return (deps.notion??((u,t)=>handleNotionConversation(u,t,{arbitrated:true})))(userId,text);
+  }
+  if (owner.owner === "slack_entity") {
+    logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+    return (deps.slack ?? ((u, t) => handleSlackConversation(u, t, { arbitrated: true })))(userId, text);
   }
 
   if (owner.owner !== "todoist_task") {

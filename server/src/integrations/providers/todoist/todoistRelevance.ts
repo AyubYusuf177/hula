@@ -147,6 +147,9 @@ function mentionsTaskWork(text: string | undefined): boolean {
 export function shouldConsiderTodoist(text: string | undefined): boolean {
   const t = norm(text);
   if (!t) return false;
+  const explicitSlackAction = /\bslack\b|#[a-z0-9_-]+/.test(t) ||
+    (/\b(?:post|message|reply|react|pin|unpin)\b/.test(t) && /\b[a-z0-9]+-[a-z0-9-]+\b/.test(t));
+  if (explicitSlackAction) return false;
 
   if (looksLikeReminderPhrase(t)) {
     // Only an EXPLICIT task-app reference overrides established reminder

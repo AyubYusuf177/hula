@@ -94,6 +94,16 @@ const envSchema = z.object({
   NOTION_OAUTH_CLIENT_SECRET: z.string().optional(),
   NOTION_OAUTH_REDIRECT_URI: z.string().url().optional(),
   NOTION_API_VERSION: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().default("2026-03-11"),
+  SLACK_CLIENT_ID: z.string().optional(),
+  SLACK_CLIENT_SECRET: z.string().optional(),
+  SLACK_REDIRECT_URI: z.string().url().optional(),
+  SLACK_SIGNING_SECRET: z.string().optional(),
+  SLACK_BOT_SCOPES: z.string().optional(),
+  SLACK_USER_SCOPES: z.string().optional(),
+  // Optional development-only workspace hint for Slack's OAuth `team`
+  // parameter. Use the workspace ID (T…), never a workspace URL or name.
+  // Leave unset for distributed multi-workspace installs.
+  SLACK_DEVELOPMENT_TEAM_ID: z.string().optional(),
 
   // Billing — placeholder, not wired yet
   BILLING_PROVIDER_API_KEY: z.string().optional(),

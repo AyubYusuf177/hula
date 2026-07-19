@@ -186,7 +186,18 @@ export async function getUserIntegrationStatus(
   return listIntegrationCatalog()
     .filter((entry) => entry.provider !== "generic")
     .map((entry) => {
-      const configured=entry.provider!=="notion"||Boolean(env.NOTION_OAUTH_CLIENT_ID&&env.NOTION_OAUTH_CLIENT_SECRET&&env.NOTION_OAUTH_REDIRECT_URI&&env.NOTION_API_VERSION&&env.INTEGRATION_TOKEN_ENCRYPTION_KEY);
+      const configured = entry.provider === "notion"
+        ? Boolean(
+            env.NOTION_OAUTH_CLIENT_ID && env.NOTION_OAUTH_CLIENT_SECRET &&
+            env.NOTION_OAUTH_REDIRECT_URI && env.NOTION_API_VERSION &&
+            env.INTEGRATION_TOKEN_ENCRYPTION_KEY,
+          )
+        : entry.provider === "slack"
+          ? Boolean(
+              env.SLACK_CLIENT_ID && env.SLACK_CLIENT_SECRET &&
+              env.SLACK_REDIRECT_URI && env.INTEGRATION_TOKEN_ENCRYPTION_KEY,
+            )
+          : true;
       return toIntegrationStatusItem(entry,byProvider.get(entry.provider),configured);
     });
 }

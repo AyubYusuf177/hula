@@ -8,6 +8,7 @@ import gmail from '@/assets/images/integrations/gmail.png';
 import todoist from '@/assets/images/integrations/todoist.png';
 import asana from '@/assets/images/integrations/asana.png';
 import notion from '@/assets/images/integrations/notion.png';
+import slack from '@/assets/images/integrations/slack.png';
 
 export const images = {
   hulaLogo,
@@ -32,4 +33,5 @@ export const integrationIcons = {
   asana,
   // Official, unmodified Notion iOS product mark served by notion.so.
   notion,
+  slack,
 } as const;

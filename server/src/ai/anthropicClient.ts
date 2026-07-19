@@ -32,6 +32,7 @@ export async function generateAnthropicText(params: {
   system: string;
   messages: AnthropicMessage[];
   maxTokens?: number;
+  timeoutMs?: number;
 }): Promise<string> {
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -41,20 +42,31 @@ export async function generateAnthropicText(params: {
     throw new Error("Anthropic request has no messages");
   }
 
-  const res = await fetch(ANTHROPIC_MESSAGES_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify({
-      model: env.ANTHROPIC_MODEL,
-      max_tokens: params.maxTokens ?? 600,
-      system: params.system,
-      messages: params.messages,
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.min(Math.max(params.timeoutMs ?? 30_000, 1_000), 60_000));
+  let res: Response;
+  try {
+    res = await fetch(ANTHROPIC_MESSAGES_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({
+        model: env.ANTHROPIC_MODEL,
+        max_tokens: params.maxTokens ?? 600,
+        system: params.system,
+        messages: params.messages,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error("Anthropic request timed out");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     // Short, redacted diagnostic snippet — never includes request headers/key.

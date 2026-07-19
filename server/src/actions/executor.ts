@@ -1,4 +1,6 @@
 import { logger } from "../utils/logger";
+import { executeSlackMutation } from "../integrations/providers/slack/actions";
+import { rememberVerifiedSlackMutation } from "../integrations/providers/slack/context";
 import { getUserTimezone } from "../reminders/reminders";
 import {
   GoogleCalendarError,
@@ -260,6 +262,8 @@ export interface ExecuteActionDeps {
   archiveNotionBlock?: typeof notionOps.archiveBlock;
   appendNotionBlocks?: typeof notionOps.appendBlocks;
   recordNotionEntity?: typeof recordNotionEntity;
+  executeSlackMutation?: typeof executeSlackMutation;
+  rememberSlackMutation?: typeof rememberVerifiedSlackMutation;
   /**
    * Waits between bounded delete-absence re-reads. Injected so tests exercise the
    * real backoff logic without spending real time.
@@ -591,6 +595,53 @@ export async function executeAction(
       });
     }
 
+    if (actionId === "slack.postMessage" || actionId === "slack.mutate") {
+      const method = actionId === "slack.postMessage"
+        ? "chat.postMessage"
+        : readStr(input, "method");
+      const params = actionId === "slack.postMessage"
+        ? { channel: readStr(input, "channel"), text: readStr(input, "text") }
+        : input?.params && typeof input.params === "object"
+          ? input.params as Record<string, unknown>
+          : {};
+      if (!method) throw new Error("missing_slack_method");
+      const receipt = await (deps.executeSlackMutation ?? executeSlackMutation)(userId, method, params);
+      try {
+        await (deps.rememberSlackMutation ?? rememberVerifiedSlackMutation)(userId, receipt, params);
+      } catch (error) {
+        // Context is helpful but not part of Slack's authoritative mutation receipt.
+        // A local context-store failure must not turn a confirmed provider success
+        // into a false failure or cause the mutation to be retried.
+        logger.error("slack.context record failed", {
+          actionId,
+          reason: error instanceof Error ? error.name : "unknown",
+        });
+      }
+      const executionId = await record(userId, {
+        proposalId: options.proposalId ?? null,
+        provider: "slack",
+        actionId,
+        status: "succeeded",
+        requestSummary: { method, inputKeys },
+        resultSummary: {
+          receiptValidated: true,
+          hasChannelReceipt: Boolean(receipt.channelId),
+          hasTimestampReceipt: Boolean(receipt.timestamp),
+          hasScheduledReceipt: Boolean(receipt.scheduledMessageId),
+        },
+      });
+      const success = readStr(input, "successText") ??
+        (method === "chat.postMessage" ? "Sent the Slack message." : "Updated Slack.");
+      return {
+        ok: true,
+        status: "succeeded",
+        actionId,
+        provider: "slack",
+        userMessage: success,
+        executionId,
+      };
+    }
+
     // Allowed but no adapter wired (should not happen while only reads are
     // implemented) — stay honest and log it.
     const executionId = await record(userId, {
@@ -613,6 +664,10 @@ export async function executeAction(
     // Provider/DB failure — never surface token/secret detail.
     const notConnected =
       err instanceof GoogleCalendarError && err.reason === "not_connected";
+    const slackMissingScope = actionId.startsWith("slack.") &&
+      err instanceof Error && err.message === "slack_missing_scope";
+    const slackNotConnected = actionId.startsWith("slack.") &&
+      err instanceof Error && err.message === "slack_not_connected";
     logger.error("action.execute failed", {
       actionId,
       reason: err instanceof Error ? err.message : "unknown error",
@@ -623,14 +678,20 @@ export async function executeAction(
       actionId,
       status: "failed",
       requestSummary: { inputKeys },
-      errorMessage: notConnected ? "not_connected" : "execution_failed",
+      errorMessage: notConnected || slackNotConnected
+        ? "not_connected"
+        : slackMissingScope
+          ? "missing_scope"
+          : "execution_failed",
     });
     return {
       ok: false,
       status: "failed",
       actionId,
       provider: policy.provider,
-      userMessage: notConnected
+      userMessage: slackMissingScope
+        ? "Slack didn’t grant the permission needed for that change. Reinstall Slack from Integrations to update permissions."
+        : notConnected || slackNotConnected
         ? "I don’t have that app connected yet, so I can’t do that."
         : "I ran into a problem trying to do that — mind trying again in a bit?",
       executionId,

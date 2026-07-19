@@ -52,6 +52,7 @@ export type EntityKind =
   | "gmail_email"
   | "gmail_draft"
   | "calendar_event"
+  | "slack_entity"
   | "memory_item";
 
 /**
@@ -63,6 +64,9 @@ export type EntityKind =
  * happen. The ids are a stable storage contract, and the tests pin them.
  */
 export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" }[] = [
+  { actionId: "slack.lastSelection", kind: "slack_entity" },
+  { actionId: "slack.derivedSelection", kind: "slack_entity" },
+  { actionId: "slack.entityContext", kind: "slack_entity" },
   { actionId: "notion.lastSelection", kind: "notion_entity" },
   { actionId: "notion.entityContext", kind: "notion_entity" },
   { actionId: "asana.lastSelection", kind: "asana_task" },
@@ -117,6 +121,10 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
   if (!t) return [];
   const kinds = new Set<EntityKind>();
 
+  if (/\bslack\b|#[a-z0-9_-]+|\bslack\s+(?:channel|message|thread|workspace)\b/.test(t)) {
+    kinds.add("slack_entity");
+  }
+
   // An explicit provider name wins over generic task nouns.
   if (/\basana\b/.test(t)) {
     kinds.add("asana_task");
@@ -147,14 +155,14 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
   }
 
   // Gmail messages: inbox nouns and mail-specific verbs.
-  if (
+  if (!/\bslack\b/.test(t) && (
     /\breply\b/.test(t) ||
     /\bemails?\b/.test(t) ||
     /\binbox\b/.test(t) ||
     /\bsenders?\b/.test(t) ||
     /\bunread\b/.test(t) ||
     /\barchive\b/.test(t)
-  ) {
+  )) {
     kinds.add("gmail_email");
   }
 
@@ -287,6 +295,7 @@ export function conflictClarification(kinds: readonly EntityKind[]): string {
     gmail_email: "an email",
     gmail_draft: "an email draft",
     calendar_event: "a calendar event",
+    slack_entity: "Slack content",
     memory_item: "something I’ve remembered",
   };
   const names = [...new Set(kinds.map((k) => label[k]))];

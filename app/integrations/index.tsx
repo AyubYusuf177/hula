@@ -32,11 +32,13 @@ import {
   connectGoogleCalendar,
   connectTodoist,
   connectNotion,
+  connectSlack,
   disconnectGmail,
   disconnectAsana,
   disconnectGoogleCalendar,
   disconnectTodoist,
   disconnectNotion,
+  disconnectSlack,
   fetchUserIntegrations,
   GMAIL_PROVIDER,
   ASANA_PROVIDER,
@@ -49,6 +51,9 @@ import {
   TodoistNotConfiguredError,
   NOTION_PROVIDER,
   NotionNotConfiguredError,
+  SLACK_PROVIDER,
+  SlackNotConfiguredError,
+  SlackConnectError,
   type IntegrationStatus,
 } from '@/lib/hulaApi';
 import {
@@ -94,6 +99,7 @@ const CONNECT_STARTERS: Record<string, ConnectStarter | undefined> = {
   [TODOIST_PROVIDER]: (token, appReturnUrl) => connectTodoist(token, { appReturnUrl }),
   [ASANA_PROVIDER]: (token, appReturnUrl) => connectAsana(token, { appReturnUrl }),
   [NOTION_PROVIDER]: (token, appReturnUrl) => connectNotion(token, { appReturnUrl }),
+  [SLACK_PROVIDER]: (token, appReturnUrl) => connectSlack(token, { appReturnUrl }),
 };
 
 const DISCONNECTERS: Record<
@@ -105,9 +111,31 @@ const DISCONNECTERS: Record<
   [TODOIST_PROVIDER]: disconnectTodoist,
   [ASANA_PROVIDER]: disconnectAsana,
   [NOTION_PROVIDER]: disconnectNotion,
+  [SLACK_PROVIDER]: disconnectSlack,
 };
 
 type StatusMap = Record<string, IntegrationStatus | null>;
+
+class OAuthSessionCancelledError extends Error {
+  constructor() {
+    super('OAuth session cancelled');
+    this.name = 'OAuthSessionCancelledError';
+  }
+}
+
+function slackConnectErrorMessage(error: SlackConnectError): string {
+  switch (error.code) {
+    case 'invalid_scope_configuration':
+    case 'missing_required_scope_configuration':
+      return 'Slack permissions are misconfigured on the backend.';
+    case 'invalid_redirect_uri':
+      return 'Slack’s callback URL is misconfigured.';
+    case 'invalid_development_team_id':
+      return 'Slack’s development workspace ID is misconfigured.';
+    default:
+      return 'Couldn’t start Slack authorization. Please try again.';
+  }
+}
 
 /** Build the screen's StatusMap from a backend/cache status list. */
 function toStatusMap(list: IntegrationStatus[]): StatusMap {
@@ -291,7 +319,10 @@ export default function IntegrationsScreen() {
       // Prefer the auth session (auto-dismisses on the return-URL scheme); fall
       // back to a plain system-browser open if it isn't available. Never a WebView.
       if (WebBrowser.openAuthSessionAsync) {
-        await WebBrowser.openAuthSessionAsync(authorizationUrl, returnUrl);
+        const result = await WebBrowser.openAuthSessionAsync(authorizationUrl, returnUrl);
+        if (result.type === 'cancel' || result.type === 'dismiss') {
+          throw new OAuthSessionCancelledError();
+        }
       } else {
         await WebBrowser.openBrowserAsync(authorizationUrl);
       }
@@ -303,7 +334,12 @@ export default function IntegrationsScreen() {
         err instanceof TodoistNotConfiguredError
         || err instanceof AsanaNotConfiguredError
         || err instanceof NotionNotConfiguredError
+        || err instanceof SlackNotConfiguredError
           ? 'This connection isn’t available yet. Please try again later.'
+          : err instanceof SlackConnectError
+            ? slackConnectErrorMessage(err)
+            : err instanceof OAuthSessionCancelledError
+              ? 'Slack connection was cancelled. Nothing changed.'
           : err instanceof MissingApiUrlError
             ? 'Hula backend URL is not configured.'
             : 'Couldn’t start the connection. Please try again.';
