@@ -18,7 +18,7 @@ export const SlackOperationSchema = z.enum([
 const nullableText = (max: number) => z.string().trim().min(1).max(max).nullable().optional();
 
 export const SlackIntentSchema = z.object({
-  provider: z.enum(["slack", "gmail", "calendar", "todoist", "asana", "notion", "reminder", "memory", "unknown"]),
+  provider: z.enum(["slack", "google_drive", "gmail", "calendar", "todoist", "asana", "notion", "reminder", "memory", "unknown"]),
   operation: SlackOperationSchema,
   targetType: z.enum(["workspace", "channel", "dm", "mpim", "user", "message", "thread", "reply", "file", "bookmark", "user_group", "unknown"]).nullable().optional(),
   targetName: nullableText(200),
@@ -162,7 +162,7 @@ export function buildSlackIntentPrompt(context: boolean): string {
   return [
     "Interpret one user request for provider routing. Return strict JSON only. Never answer or execute the request.",
     "Choose provider slack only when Slack is explicit, the user refers to a channel/DM/message/thread in Slack terms, or verified Slack context was supplied.",
-    "Email is Gmail; events and meetings are Calendar; tasks are Todoist/Asana; Notion pages stay Notion; reminders and memory stay Hula. An ordinary ambiguous question is unknown.",
+    "Email is Gmail; Google Drive files and Google Docs stay Google Drive; events and meetings are Calendar; tasks are Todoist/Asana; Notion pages stay Notion; reminders and memory stay Hula. An ordinary ambiguous question is unknown.",
     context
       ? "Verified durable arbitration says the unresolved pronoun/ordinal refers to Slack. Preserve unresolvedReference and infer the Slack operation."
       : "No verified Slack context exists. Do not assume Slack for vague requests such as 'what happened?'. A plausible named channel may be Slack, but deterministic code will verify the name and decline if it does not resolve.",

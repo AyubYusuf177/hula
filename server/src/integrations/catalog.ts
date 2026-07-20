@@ -16,6 +16,7 @@
 export type ProviderId =
   | "google_calendar"
   | "gmail"
+  | "google_drive"
   | "todoist"
   | "zoom"
   | "notion"
@@ -108,6 +109,28 @@ export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
     capabilities: ["email.read", "email.draft", "email.send", "email.modify"],
     notes:
       "Live integration. Read (Section 14) + draft/send (Section 16) + search, draft lifecycle, and message management (Section 17) via OAuth (Authorization Code + PKCE). Drafting/sending requires gmail.compose; marking/starring/archiving/trashing requires gmail.modify. Every send, draft deletion, and trash needs explicit confirmation.",
+  },
+  {
+    provider: "google_drive",
+    displayName: "Google Drive",
+    category: "productivity",
+    status: "available_readonly",
+    authType: "oauth2",
+    // Section 23 deliberately combines broad READ-ONLY discovery with per-file
+    // writes. `drive.file` alone cannot search/read arbitrary existing Drive
+    // files; it only covers files Hula creates or the user explicitly authorises.
+    // We never request the full `drive` management scope.
+    defaultScopes: [
+      "https://www.googleapis.com/auth/drive.readonly",
+      "https://www.googleapis.com/auth/drive.file",
+    ],
+    capabilities: [
+      "drive.files.read",
+      "drive.content.read",
+      "drive.files.create",
+    ],
+    notes:
+      "Live Google Drive and Docs integration. Searches and reads authorised Drive content with drive.readonly; creates folders and Google Docs with the per-file drive.file scope. The restricted drive.readonly scope requires production OAuth verification and data-handling review.",
   },
   {
     provider: "todoist",

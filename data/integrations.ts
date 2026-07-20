@@ -17,6 +17,7 @@ import {
   ASANA_PROVIDER,
   GMAIL_PROVIDER,
   GOOGLE_CALENDAR_PROVIDER,
+  GOOGLE_DRIVE_PROVIDER,
   NOTION_PROVIDER,
   SLACK_PROVIDER,
   TODOIST_PROVIDER,
@@ -91,6 +92,23 @@ export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
     connectLabel: 'Connect Gmail',
     authorizationProviderLabel: 'Google',
     disconnectLabel: 'Disconnect Gmail',
+  },
+  {
+    id: GOOGLE_DRIVE_PROVIDER,
+    displayName: 'Google Drive',
+    category: 'ORGANIZATION',
+    iconImage: integrationIcons.google_drive,
+    accent: '#4285F4',
+    summary: 'Finds, reads and understands your authorized Drive files.',
+    sheetHeading: 'Google Drive',
+    connectedHeading: 'Google Drive',
+    sheetBody:
+      'Connect Google Drive to find, read, summarize and compare authorized Drive files from iMessage. Hula can create a root folder or Google Doc after you confirm. PDF, Office and image files remain metadata and link only.',
+    connectedBody:
+      'Hula can find and read authorized Drive files, understand Google Docs and plain text, and create a root folder or Google Doc after confirmation. PDF, Office and image files remain metadata and link only.',
+    connectLabel: 'Connect Google Drive',
+    authorizationProviderLabel: 'Google',
+    disconnectLabel: 'Disconnect Google Drive',
   },
   {
     id: TODOIST_PROVIDER,

@@ -197,7 +197,13 @@ export async function getUserIntegrationStatus(
               env.SLACK_CLIENT_ID && env.SLACK_CLIENT_SECRET &&
               env.SLACK_REDIRECT_URI && env.INTEGRATION_TOKEN_ENCRYPTION_KEY,
             )
-          : true;
+          : entry.provider === "google_drive"
+            ? Boolean(
+                env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET &&
+                env.GOOGLE_DRIVE_OAUTH_REDIRECT_URI &&
+                env.INTEGRATION_TOKEN_ENCRYPTION_KEY,
+              )
+            : true;
       return toIntegrationStatusItem(entry,byProvider.get(entry.provider),configured);
     });
 }

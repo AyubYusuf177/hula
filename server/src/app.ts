@@ -5,6 +5,7 @@ import { notionRouter } from "./routes/notion";
 
 import { gmailRouter } from "./routes/gmail";
 import { googleCalendarRouter } from "./routes/googleCalendar";
+import { googleDriveRouter } from "./routes/googleDrive";
 import { healthRouter } from "./routes/health";
 import { linkSessionsRouter } from "./routes/linkSessions";
 import { meRouter } from "./routes/me";
@@ -29,6 +30,7 @@ export function createApp(): Express {
   // captured as a provider slug.
   app.use(googleCalendarRouter);
   app.use(gmailRouter);
+  app.use(googleDriveRouter);
   app.use(todoistRouter);
   app.use(asanaRouter);
   app.use(notionRouter);

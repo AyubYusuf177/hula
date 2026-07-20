@@ -15,6 +15,7 @@
     "test:asana-self-assignment": "tsx scripts/asanaSelfAssignment.test.ts",
     "test:notion": "tsx scripts/notion.test.ts",
     "test:slack": "tsx scripts/slack.test.ts",
+    "test:google-drive": "tsx scripts/googleDrive.test.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run test:slack",

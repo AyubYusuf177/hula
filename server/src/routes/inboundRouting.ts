@@ -29,6 +29,7 @@ import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
 import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleNotionConversation } from "../integrations/providers/notion/conversation";
 import { handleSlackConversation } from "../integrations/providers/slack/conversation";
+import { handleGoogleDriveConversation } from "../integrations/providers/googleDrive/conversation";
 import { handleTransportKeyword } from "../channels/transportKeywords";
 import { handleEntityFollowup } from "./entityFollowup";
 import { handleMemoryCommand } from "../users/memory";
@@ -57,6 +58,8 @@ import { handleReminderCommand } from "../reminders/reminders";
 export interface HandlerResult {
   handled: boolean;
   reply?: string;
+  /** Underlying provider when a cross-provider arbiter delegated the request. */
+  routeSource?: string;
 }
 
 type Handler = (userId: string, text: string | undefined) => Promise<HandlerResult>;
@@ -90,6 +93,7 @@ export interface InboundRouterDeps {
   asanaRead?: Handler;
   notion?: Handler;
   slack?: Handler;
+  drive?: Handler;
   pendingReprompt?: (userId: string) => Promise<HandlerResult>;
 }
 
@@ -188,6 +192,9 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     // cannot decide who owns "the second one" — only the last grounded list can.
     { name: "entityFollowup", run: deps.entityFollowup ?? handleEntityFollowup },
     { name: "slack", run: deps.slack ?? handleSlackConversation },
+    // Drive is semantically gated and runs before Notion so an explicit Google
+    // Doc can never be claimed as a generic Notion document/page request.
+    { name: "drive", run: deps.drive ?? handleGoogleDriveConversation },
     // Explicit Notion and Notion-owned follow-ups run before task providers. Its
     // semantic extractor declines Todoist, Asana, mail, calendar and reminders.
     { name: "notion", run: deps.notion ?? handleNotionConversation },
@@ -241,7 +248,7 @@ export async function routeInboundText(
 ): Promise<RoutedReply | null> {
   for (const { name, run } of buildChain(deps)) {
     const result = await run(userId, text);
-    if (result.handled && result.reply) return { reply: result.reply, source: name };
+    if (result.handled && result.reply) return { reply: result.reply, source: result.routeSource ?? name };
   }
 
   // Safety net: with a confirmable action pending, an unrecognised reply must be

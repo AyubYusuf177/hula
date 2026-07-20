@@ -161,6 +161,8 @@ check("registry: implemented actions include the Notion adapter", () => {
     "calendar.findNextEvent",
     "calendar.listEvents",
     "calendar.updateEvent",
+    "drive.createDocument",
+    "drive.createFolder",
     "email.createDraft",
     "email.deleteDraft",
     "email.modifyLabels",

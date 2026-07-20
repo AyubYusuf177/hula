@@ -70,6 +70,12 @@ const envSchema = z.object({
   GMAIL_OAUTH_REDIRECT_URI: z.string().optional(),
   GMAIL_SCOPES: z.string().optional(),
 
+  // Google Drive OAuth (Section 23). Reuses the shared Google client id/secret,
+  // but remains a separate provider connection with its own redirect URI and
+  // encrypted credential. Optional at boot; validated when connect starts.
+  GOOGLE_DRIVE_OAUTH_REDIRECT_URI: z.string().optional(),
+  GOOGLE_DRIVE_SCOPES: z.string().optional(),
+
   // Todoist OAuth (Section 19) — all OPTIONAL. Todoist is its own OAuth app with
   // its own client id/secret and redirect URI (it does NOT share Google's). All
   // are required only when a user actually starts the Todoist connect flow; a

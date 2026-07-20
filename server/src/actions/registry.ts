@@ -71,6 +71,7 @@ export interface ActionDefinition {
 
 const GCAL_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
 const ASANA_RESOURCE_ACTIONS: ActionDefinition[] = ([
   ["project", "projects", "projects", true, true],
@@ -729,6 +730,52 @@ export const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
     actionId:"asana.portfolio.membership",category:"tasks",displayName:"Change Asana portfolio membership",description:"Add or remove a verified project from a verified portfolio.",providerTypes:["asana"],requiredCapabilities:["portfolios.write"],requiredScopes:["portfolios:write"],riskLevel:"write",confirmationRequired:true,implemented:true,enabled:true,inputSchema:[{name:"portfolioId",type:"string",required:true,description:"Resolved portfolio."},{name:"itemId",type:"string",required:true,description:"Resolved project."},{name:"operation",type:"string",required:true,description:"addItem or removeItem."}],examples:["add that project to my portfolio"],userFacingDescription:"I couldn’t verify that Asana portfolio change.",
   },
   // --- Documents ---------------------------------------------------------
+  {
+    actionId: "drive.createFolder",
+    category: "documents",
+    displayName: "Create Google Drive folder",
+    description: "Create one empty folder in My Drive root with a deterministic Hula idempotency key.",
+    providerTypes: ["google_drive"],
+    requiredCapabilities: ["drive.files.create"],
+    requiredScopes: [GOOGLE_DRIVE_FILE_SCOPE],
+    riskLevel: "write",
+    confirmationRequired: true,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "name", type: "string", required: true, description: "Folder name." },
+      { name: "idempotencyKey", type: "string", required: true, description: "Stable Hula request key." },
+    ],
+    outputSchema: [
+      { name: "fileId", type: "string", required: true, description: "Authoritative Google Drive file id." },
+    ],
+    examples: ["create a folder in Google Drive called Acme"],
+    userFacingDescription: "I couldn’t verify that Google Drive folder creation.",
+  },
+  {
+    actionId: "drive.createDocument",
+    category: "documents",
+    displayName: "Create Google Doc",
+    description: "Create one Google Doc in My Drive root and insert its initial bounded content.",
+    providerTypes: ["google_drive"],
+    requiredCapabilities: ["drive.files.create"],
+    requiredScopes: [GOOGLE_DRIVE_FILE_SCOPE],
+    riskLevel: "write",
+    confirmationRequired: true,
+    implemented: true,
+    enabled: true,
+    inputSchema: [
+      { name: "name", type: "string", required: true, description: "Document title." },
+      { name: "content", type: "string", required: false, description: "Initial content, bounded before execution." },
+      { name: "idempotencyKey", type: "string", required: true, description: "Stable Hula request key." },
+    ],
+    outputSchema: [
+      { name: "fileId", type: "string", required: true, description: "Authoritative Google Drive file id." },
+      { name: "contentApplied", type: "boolean", required: true, description: "Whether initial content was applied." },
+    ],
+    examples: ["create a Google Doc called Launch Notes with these notes"],
+    userFacingDescription: "I couldn’t verify that Google Doc creation.",
+  },
   {
     actionId: "notion.mutate", category: "documents", displayName: "Change Notion content",
     description: "Execute one already-resolved Notion mutation and verify its authoritative receipt.",

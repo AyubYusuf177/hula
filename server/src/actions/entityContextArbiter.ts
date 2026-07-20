@@ -52,6 +52,7 @@ export type EntityKind =
   | "gmail_email"
   | "gmail_draft"
   | "calendar_event"
+  | "drive_file"
   | "slack_entity"
   | "memory_item";
 
@@ -64,6 +65,9 @@ export type EntityKind =
  * happen. The ids are a stable storage contract, and the tests pin them.
  */
 export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" }[] = [
+  { actionId: "drive.unresolvedAmbiguity", kind: "drive_file" },
+  { actionId: "drive.lastSelection", kind: "drive_file" },
+  { actionId: "drive.entityContext", kind: "drive_file" },
   { actionId: "slack.lastSelection", kind: "slack_entity" },
   { actionId: "slack.derivedSelection", kind: "slack_entity" },
   { actionId: "slack.entityContext", kind: "slack_entity" },
@@ -98,11 +102,16 @@ export function isFollowupShape(text: string | undefined): boolean {
   if (/\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)\s+one\b/.test(t)) {
     return true;
   }
+  if (/\b(?:the|that|this)\s+one\b/.test(t)) return true;
   // "the second one's priority", "the second task", "the 2nd"
   if (/\b(?:first|second|third|fourth|fifth|last)\b/.test(t)) return true;
   if (/\b\d{1,2}(?:st|nd|rd|th)\b/.test(t)) return true;
   if (/\ball\s+(?:of\s+)?(?:them|those|these)\b/.test(t)) return true;
   if (/\b(?:it|its|that|this|them|those|these|they)\b/.test(t)) return true;
+  // Named read follow-ups can still refer to the immediately shown entity:
+  // “What is Team Text?” and “Give me the link to Team Text.” Preserve the
+  // existing context arbitration instead of sending these to the brain.
+  if (/^(?:what(?:'s| is)|tell me about|give me (?:the )?link to)\b/.test(t)) return true;
   return false;
 }
 
@@ -123,6 +132,10 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
 
   if (/\bslack\b|#[a-z0-9_-]+|\bslack\s+(?:channel|message|thread|workspace)\b/.test(t)) {
     kinds.add("slack_entity");
+  }
+
+  if (/\bgoogle\s+drive\b|\bgoogle\s+docs?\b|\b(?:docs|drive)\.google\.com\b/.test(t)) {
+    kinds.add("drive_file");
   }
 
   // An explicit provider name wins over generic task nouns.
@@ -223,12 +236,15 @@ export function toProviderFamilies(kinds: readonly EntityKind[]): string[] {
 /** A grounded context the user was actually shown, with when it was established. */
 export interface GroundedContext {
   kind: EntityKind;
+  actionId: string;
   /** ms since epoch — used only to pick the most recent. */
   at: number;
+  /** Safe display names already shown to this user; never provider body content. */
+  names: string[];
 }
 
 export interface ArbiterDeps {
-  listRecent?: (userId: string, actionId: string) => Promise<ActionProposalView[]>;
+  listRecent?: (userId: string, actionId: string, limit?: number) => Promise<ActionProposalView[]>;
   now?: Date;
 }
 
@@ -236,6 +252,23 @@ export interface ArbiterDeps {
 function gmailKindFromRow(row: ActionProposalView): EntityKind {
   const itemKind = (row.input as { itemKind?: unknown } | null)?.itemKind;
   return itemKind === "drafts" ? "gmail_draft" : "gmail_email";
+}
+
+function contextNames(row: ActionProposalView, actionId: string): string[] {
+  if (actionId === "drive.lastSelection" || actionId === "drive.unresolvedAmbiguity") {
+    const refs = (row.input as { refs?: unknown } | null)?.refs;
+    if (!Array.isArray(refs)) return [];
+    return refs.flatMap((ref) => {
+      const name = ref && typeof ref === "object" ? (ref as { name?: unknown }).name : null;
+      return typeof name === "string" && name.trim() ? [name.trim()] : [];
+    }).slice(0, 20);
+  }
+  if (actionId === "drive.entityContext") {
+    const ref = (row.input as { ref?: unknown } | null)?.ref;
+    const name = ref && typeof ref === "object" ? (ref as { name?: unknown }).name : null;
+    return typeof name === "string" && name.trim() ? [name.trim()] : [];
+  }
+  return [];
 }
 
 /**
@@ -256,7 +289,7 @@ export async function loadGroundedContexts(
   for (const source of CONTEXT_SOURCES) {
     let rows: ActionProposalView[];
     try {
-      rows = await listRecent(userId, source.actionId);
+      rows = await listRecent(userId, source.actionId, 100);
     } catch {
       // A lookup failure must never fabricate an owner — treat as no context.
       continue;
@@ -270,7 +303,9 @@ export async function loadGroundedContexts(
       if (!Number.isFinite(at)) continue;
       found.push({
         kind: source.kind === "gmail_either" ? gmailKindFromRow(row) : source.kind,
+        actionId: source.actionId,
         at,
+        names: contextNames(row, source.actionId),
       });
     }
   }
@@ -286,6 +321,64 @@ export type FollowupOwner =
   | { kind: "conflict"; clarification: string }
   | { kind: "none" };
 
+function normalizedName(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function textMentionsName(text: string, name: string): boolean {
+  const haystack = normalizedName(text);
+  const needle = normalizedName(name);
+  if (needle.length < 2) return false;
+  const index = haystack.indexOf(needle);
+  if (index < 0) return false;
+  const before = haystack[index - 1] ?? "";
+  const after = haystack[index + needle.length] ?? "";
+  return !/[\p{L}\p{N}]/u.test(before) && !/[\p{L}\p{N}]/u.test(after);
+}
+
+interface NamedContextMatch {
+  kind: EntityKind;
+  name: string;
+}
+
+function namedContextOwner(text: string, contexts: GroundedContext[]): NamedContextMatch | null {
+  const matches = contexts.flatMap((context) => context.names
+    .filter((name) => textMentionsName(text, name))
+    .map((name) => ({ kind: context.kind, name, length: normalizedName(name).length, at: context.at })));
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => b.length - a.length || b.at - a.at);
+  const longest = matches[0]!.length;
+  const kinds = [...new Set(matches.filter((match) => match.length === longest).map((match) => match.kind))];
+  return kinds.length === 1 ? { kind: kinds[0]!, name: matches[0]!.name } : null;
+}
+
+/** Provider brands/signals only; generic content nouns deliberately do not count. */
+function explicitProviderKinds(text: string): EntityKind[] {
+  const kinds = new Set<EntityKind>();
+  if (/\bslack\b|#[a-z0-9_-]+/i.test(text)) kinds.add("slack_entity");
+  if (/\bgoogle\s+drive\b|\bgoogle\s+docs?\b|\b(?:docs|drive)\.google\.com\b/i.test(text)) kinds.add("drive_file");
+  if (/\basana\b/i.test(text)) kinds.add("asana_task");
+  if (/\bnotion\b/i.test(text)) kinds.add("notion_entity");
+  if (/\btodoist\b/i.test(text)) kinds.add("todoist_task");
+  if (/\bgmail\b|\bemails?\b|\binbox\b/i.test(text)) kinds.add("gmail_email");
+  if (/\bcalendar\b|\bmeetings?\b|\bevents?\b/i.test(text)) kinds.add("calendar_event");
+  if (/\bremind(?:er)?\b/i.test(text)) kinds.add("memory_item");
+  if (/\bmemor(?:y|ies)\b/i.test(text)) kinds.add("memory_item");
+  return [...kinds];
+}
+
+function withoutNamedMention(text: string, name: string): string {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp(escaped, "giu"), " ").replace(/\s+/g, " ").trim();
+}
+
+function mayNameGroundedEntity(text: string): boolean {
+  return /[A-Z][\p{L}\p{N}.'-]*(?:\s+[A-Z][\p{L}\p{N}.'-]*)+/u.test(text) ||
+    /[\p{L}\p{N} _-]+\.(?:pdf|docx?|xlsx?|pptx?|txt|md)\b/iu.test(text) ||
+    /^(?:who|what|when|where|why|how)\b.*\b(?:in|from|about)\s+.{2,}$/iu.test(text) ||
+    /^(?:summari[sz]e|show me|tell me about|give me (?:the )?link to)\s+.{2,}$/iu.test(text);
+}
+
 /** PURE: a precise, non-mutating clarification for a cross-provider conflict. */
 export function conflictClarification(kinds: readonly EntityKind[]): string {
   const label: Record<EntityKind, string> = {
@@ -295,6 +388,7 @@ export function conflictClarification(kinds: readonly EntityKind[]): string {
     gmail_email: "an email",
     gmail_draft: "an email draft",
     calendar_event: "a calendar event",
+    drive_file: "a Google Drive file",
     slack_entity: "Slack content",
     memory_item: "something I’ve remembered",
   };
@@ -318,10 +412,65 @@ export async function resolveFollowupOwner(
   text: string | undefined,
   deps: ArbiterDeps = {},
 ): Promise<FollowupOwner> {
-  if (!isFollowupShape(text)) return { kind: "none" };
+  const value = (text ?? "").trim();
+  const followup = isFollowupShape(value);
+  const mayNameEntity = mayNameGroundedEntity(value);
+  const factualQuestion = /^(?:who|what|when|where|why|how|does|is|are|which)\b/i.test(value);
+  if (!followup && !mayNameEntity && !factualQuestion) return { kind: "none" };
 
-  const explicit = explicitEntityKinds(text);
+  const contexts = await loadGroundedContexts(userId, deps);
+  const namedOwner = namedContextOwner(value, contexts);
+  let semanticValue = value;
+
+  if (namedOwner) {
+    // Match provider brands only OUTSIDE the exact grounded title. A document
+    // called “Todoist Migration Plan” is still a Drive entity, while “show Slack
+    // messages about Launch Plan” is unambiguously Slack. This preserves explicit
+    // provider precedence without treating generic task/project nouns as brands.
+    const withoutName = withoutNamedMention(value, namedOwner.name);
+    const namedFamily = toProviderFamilies([namedOwner.kind])[0];
+    const otherProviderFamilies = toProviderFamilies(explicitProviderKinds(withoutName))
+      .filter((family) => family !== namedFamily);
+    if (otherProviderFamilies.length === 0) {
+      return { kind: "owner", owner: namedOwner.kind, reason: "explicit" };
+    }
+    semanticValue = withoutName;
+  }
+
+  const explicit = explicitEntityKinds(semanticValue);
   const families = toProviderFamilies(explicit);
+  const explicitlyBrandedElsewhere = explicitProviderKinds(semanticValue).length > 0;
+
+  // A non-follow-up reaches this arbiter only because it may contain a proper
+  // entity name. Provider words alone (for example “latest Google Docs”) must
+  // continue through the normal provider cascade; only an exact name that the
+  // user was actually shown is claimed here.
+  if (!followup) {
+    // A factual question can refer to a subject inside the currently selected
+    // Drive document without repeating its filename ("When does Project Atlas
+    // launch?"). Only a concrete active entity—not a list—may claim it, and an
+    // explicit provider noun elsewhere in the question still wins.
+    if (families.length > 0 && explicitlyBrandedElsewhere) return { kind: "none" };
+    const newest = contexts[0];
+    if (factualQuestion && newest?.actionId === "drive.entityContext") {
+      return { kind: "owner", owner: "drive_file", reason: "context" };
+    }
+    return { kind: "none" };
+  }
+
+  // An exact entity title is stronger than generic domain nouns inside that
+  // title or question (for example “project” in a Drive document question).
+  // This is the cross-provider form of explicit-current-target precedence.
+  // Inside a concrete Drive read conversation, generic task/project/priority
+  // nouns can be document content rather than a Todoist command. Read-shaped
+  // questions stay with the active document unless another provider is named.
+  if (
+    factualQuestion &&
+    !explicitlyBrandedElsewhere &&
+    contexts[0]?.actionId === "drive.entityContext"
+  ) {
+    return { kind: "owner", owner: "drive_file", reason: "context" };
+  }
 
   // 2. Cross-provider disagreement inside one message → ask, never guess.
   if (families.length > 1) {
@@ -339,7 +488,6 @@ export async function resolveFollowupOwner(
   }
 
   // 3. Otherwise: whatever the user is actually looking at.
-  const contexts = await loadGroundedContexts(userId, deps);
   const newest = contexts[0];
   if (!newest) return { kind: "none" };
   // Two provider contexts stamped at the same instant carry no defensible

@@ -109,6 +109,16 @@ import { getActionDefinition } from "./registry";
 import type { NormalizedCalendarEvent } from "../integrations/providers/googleCalendar/types";
 import { notionOps } from "../integrations/providers/notion/operations";
 import { recordNotionEntity } from "../integrations/providers/notion/context";
+import { DriveError } from "../integrations/providers/googleDrive/client";
+import {
+  createDriveFolder,
+  createGoogleDoc,
+} from "../integrations/providers/googleDrive/operations";
+import {
+  DRIVE_FOLDER_MIME,
+  GOOGLE_DOC_MIME,
+  type DriveCreationReceipt,
+} from "../integrations/providers/googleDrive/types";
 
 /**
  * Action executor (Section 12).
@@ -169,6 +179,12 @@ export interface ActionExecutionResult {
     taskIds?: string[];
     /** Asana-issued ids backed by validated receipts/read-back state. */
     asanaResourceIds?: string[];
+    /** Google Drive file id from a validated creation receipt. */
+    driveFileId?: string;
+    /** Safe provider link returned by Google, when present. */
+    driveWebViewLink?: string;
+    /** True only for an honestly reported multi-step Google Doc partial outcome. */
+    partial?: boolean;
   };
 }
 
@@ -264,6 +280,8 @@ export interface ExecuteActionDeps {
   recordNotionEntity?: typeof recordNotionEntity;
   executeSlackMutation?: typeof executeSlackMutation;
   rememberSlackMutation?: typeof rememberVerifiedSlackMutation;
+  createDriveFolder?: typeof createDriveFolder;
+  createGoogleDoc?: typeof createGoogleDoc;
   /**
    * Waits between bounded delete-absence re-reads. Injected so tests exercise the
    * real backoff logic without spending real time.
@@ -288,6 +306,29 @@ const TODOIST_ACTION_IDS: ReadonlySet<string> = new Set<TodoistActionId>([
   "task.reopen",
   "task.delete",
 ]);
+
+/**
+ * Process-local single flight complements the durable Drive appProperties key.
+ * The inbound confirmation transition already admits only one confirmed proposal;
+ * this closes the smaller concurrent direct-executor window without a schema
+ * migration. Cross-process re-delivery remains provider-idempotent via the key.
+ */
+const DRIVE_CREATE_FLIGHTS = new Map<string, Promise<DriveCreationReceipt>>();
+
+async function runDriveCreateOnce(
+  key: string,
+  create: () => Promise<DriveCreationReceipt>,
+): Promise<DriveCreationReceipt> {
+  const active = DRIVE_CREATE_FLIGHTS.get(key);
+  if (active) return active;
+  const pending = create();
+  DRIVE_CREATE_FLIGHTS.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (DRIVE_CREATE_FLIGHTS.get(key) === pending) DRIVE_CREATE_FLIGHTS.delete(key);
+  }
+}
 
 /** Generic stub reply for a defined-but-unimplemented action. */
 const GENERIC_STUB =
@@ -445,6 +486,21 @@ export async function executeAction(
           getTask: deps.fetchTodoistTask ?? fetchTask,
           recordActed: deps.recordActedTodoistTask ?? recordActedTodoistTask,
           sleep: deps.sleep,
+        },
+      );
+    }
+
+    if (actionId === "drive.createFolder" || actionId === "drive.createDocument") {
+      return await runDriveCreation(
+        userId,
+        actionId,
+        input,
+        policy.provider ?? "google_drive",
+        {
+          record,
+          proposalId: options.proposalId ?? null,
+          createFolder: deps.createDriveFolder ?? createDriveFolder,
+          createDocument: deps.createGoogleDoc ?? createGoogleDoc,
         },
       );
     }
@@ -694,6 +750,134 @@ export async function executeAction(
         : notConnected || slackNotConnected
         ? "I don’t have that app connected yet, so I can’t do that."
         : "I ran into a problem trying to do that — mind trying again in a bit?",
+      executionId,
+    };
+  }
+}
+
+async function runDriveCreation(
+  userId: string,
+  actionId: "drive.createFolder" | "drive.createDocument",
+  input: Record<string, unknown> | undefined,
+  provider: string,
+  deps: {
+    record: typeof recordActionExecution;
+    proposalId: string | null;
+    createFolder: typeof createDriveFolder;
+    createDocument: typeof createGoogleDoc;
+  },
+): Promise<ActionExecutionResult> {
+  const name = readStr(input, "name").trim();
+  const idempotencyKey = readStr(input, "idempotencyKey").trim();
+  const content = readStr(input, "content");
+  const expectedMime = actionId === "drive.createFolder" ? DRIVE_FOLDER_MIME : GOOGLE_DOC_MIME;
+  const inputValid = name.length > 0 && name.length <= 300 &&
+    idempotencyKey.length >= 16 && idempotencyKey.length <= 200 &&
+    content.length <= 12_000;
+  if (!inputValid) {
+    const executionId = await deps.record(userId, {
+      proposalId: deps.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { operation: actionId, inputKeys: Object.keys(input ?? {}) },
+      errorMessage: "invalid_input",
+    });
+    return {
+      ok: false,
+      status: "failed",
+      actionId,
+      provider,
+      userMessage: "I couldn’t validate that Drive request, so I didn’t create anything.",
+      executionId,
+    };
+  }
+
+  try {
+    const flightKey = `${userId}:${actionId}:${idempotencyKey}`;
+    const receipt = await runDriveCreateOnce(flightKey, () =>
+      actionId === "drive.createFolder"
+        ? deps.createFolder({ userId, name, idempotencyKey })
+        : deps.createDocument({ userId, name, content, idempotencyKey }),
+    );
+    const receiptValid = Boolean(receipt.fileId) && receipt.name === name &&
+      receipt.mimeType === expectedMime && receipt.idempotencyKey === idempotencyKey;
+    if (!receiptValid) throw new DriveError("malformed_provider_response");
+
+    if (actionId === "drive.createDocument" && receipt.contentApplied !== true) {
+      const executionId = await deps.record(userId, {
+        proposalId: deps.proposalId,
+        provider,
+        actionId,
+        status: "failed",
+        requestSummary: { operation: actionId, inputKeys: Object.keys(input ?? {}) },
+        resultSummary: {
+          driveFileId: receipt.fileId,
+          receiptValidated: true,
+          contentApplied: false,
+          partial: true,
+        },
+        errorMessage: "partial_document_creation",
+      });
+      const link = receipt.webViewLink ? ` ${receipt.webViewLink}` : "";
+      return {
+        ok: false,
+        status: "failed",
+        actionId,
+        provider,
+        userMessage: `Google created the Doc “${receipt.name}”, but I couldn’t verify that its initial content was added. I’m not reporting this as complete.${link}`,
+        executionId,
+        receipt: {
+          driveFileId: receipt.fileId,
+          driveWebViewLink: receipt.webViewLink ?? undefined,
+          partial: true,
+        },
+      };
+    }
+
+    const executionId = await deps.record(userId, {
+      proposalId: deps.proposalId,
+      provider,
+      actionId,
+      status: "succeeded",
+      requestSummary: { operation: actionId, inputKeys: Object.keys(input ?? {}) },
+      resultSummary: {
+        driveFileId: receipt.fileId,
+        receiptValidated: true,
+        ...(actionId === "drive.createDocument" ? { contentApplied: true } : {}),
+      },
+    });
+    const link = receipt.webViewLink ? ` ${receipt.webViewLink}` : "";
+    return {
+      ok: true,
+      status: "succeeded",
+      actionId,
+      provider,
+      userMessage: actionId === "drive.createFolder"
+        ? `Created the Google Drive folder “${receipt.name}”.${link}`
+        : `Created the Google Doc “${receipt.name}” and verified its initial content.${link}`,
+      executionId,
+      receipt: {
+        driveFileId: receipt.fileId,
+        driveWebViewLink: receipt.webViewLink ?? undefined,
+      },
+    };
+  } catch (error) {
+    const code = error instanceof DriveError ? error.reason : "execution_failed";
+    const executionId = await deps.record(userId, {
+      proposalId: deps.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { operation: actionId, inputKeys: Object.keys(input ?? {}) },
+      errorMessage: code,
+    });
+    return {
+      ok: false,
+      status: "failed",
+      actionId,
+      provider,
+      userMessage: "I couldn’t verify that Google Drive creation, so I won’t say it succeeded.",
       executionId,
     };
   }

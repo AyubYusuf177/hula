@@ -431,6 +431,45 @@ export async function disconnectGoogleCalendar(
   return disconnectIntegration(token, GOOGLE_CALENDAR_PROVIDER);
 }
 
+// --- Google Drive (Section 23) -------------------------------------------
+// A separate Hula connection that reuses the backend's Google OAuth primitives.
+// Tokens remain encrypted server-side; the app receives only safe status and URL data.
+
+export const GOOGLE_DRIVE_PROVIDER = 'google_drive';
+
+export class GoogleDriveNotConfiguredError extends Error {
+  constructor() {
+    super('Google Drive connect is not configured on the Hula backend yet.');
+    this.name = 'GoogleDriveNotConfiguredError';
+  }
+}
+
+export async function connectGoogleDrive(
+  token: string,
+  params: { appReturnUrl?: string } = {},
+): Promise<{ provider: string; authorizationUrl: string; expiresAt: string }> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+  const res = await fetch(`${BASE_URL}/v1/me/integrations/${GOOGLE_DRIVE_PROVIDER}/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(params.appReturnUrl ? { appReturnUrl: params.appReturnUrl } : {}),
+  });
+  if (res.status === 400) throw new GoogleDriveNotConfiguredError();
+  if (!res.ok) throw new Error(`google_drive/connect failed (${res.status})`);
+  const data = await res.json() as {
+    provider: string;
+    authorizationUrl?: string;
+    expiresAt: string;
+  };
+  if (!data.authorizationUrl) throw new Error('google_drive/connect returned no authorization URL');
+  return data as { provider: string; authorizationUrl: string; expiresAt: string };
+}
+
+export const fetchGoogleDriveStatus = (token: string) =>
+  fetchIntegrationStatus(token, GOOGLE_DRIVE_PROVIDER);
+export const disconnectGoogleDrive = (token: string) =>
+  disconnectIntegration(token, GOOGLE_DRIVE_PROVIDER);
+
 /** A single safe, normalized calendar event (no raw provider payload). */
 export interface GoogleCalendarEvent {
   id: string;

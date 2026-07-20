@@ -153,6 +153,30 @@ function notionList(store: FakeContextStore, userId: string, agoMs = 0, contextE
     { agoMs },
   );
 }
+function slackList(store: FakeContextStore, userId: string, agoMs = 0) {
+  store.add(userId, "slack.lastSelection", { kind: "slack_selection", refs: [{ id: "s1" }] }, { agoMs });
+}
+function driveEntity(store: FakeContextStore, userId: string, name: string, agoMs = 0, fileId = "drive-file") {
+  store.add(
+    userId,
+    "drive.entityContext",
+    {
+      kind: "drive_entity",
+      ref: {
+        fileId,
+        name,
+        mimeType: "application/vnd.google-apps.document",
+        ownerNames: [],
+        modifiedTime: "2026-07-14T12:00:00.000Z",
+        parentIds: [],
+        webViewLink: `https://docs.google.com/document/d/${fileId}/edit`,
+        driveId: null,
+        contentAvailability: "google_doc",
+      },
+    },
+    { agoMs },
+  );
+}
 
 /**
  * Route through the REAL cascade with every provider handler stubbed to shout its
@@ -177,7 +201,13 @@ async function routeWith(
         listRecent: store.listRecent,
         now: NOW,
         todoistWrite: claims("todoist"),
+        drive: claims("drive"),
       }),
+    slack: decline,
+    drive: decline,
+    notion: decline,
+    asanaWrite: decline,
+    asanaRead: decline,
     gmailClarify: decline,
     gmailDraftFollowup: decline,
     // The handler that caused the incident, behind its REAL gate. Using the real
@@ -340,6 +370,81 @@ async function run(): Promise<void> {
       now: NOW,
     });
     assert.equal(owner.kind, "none", "a stale list must not decide what 'the second one' means");
+  });
+
+  await asyncCheck("a historical named Drive entity reclaims ownership after each neighbouring provider", async () => {
+    const neighbours: Array<(store: FakeContextStore) => void> = [
+      (store) => slackList(store, "u1"),
+      (store) => gmailEmailList(store, "u1"),
+      (store) => calendarList(store, "u1"),
+      (store) => todoistList(store, "u1"),
+    ];
+    for (const [index, establishNeighbour] of neighbours.entries()) {
+      const store = new FakeContextStore();
+      const title = `Release Evidence ${index + 1}`;
+      driveEntity(store, "u1", title, 10_000, `drive-${index + 1}`);
+      establishNeighbour(store);
+      const owner = await resolveFollowupOwner("u1", `Who needs to do what in ${title}?`, {
+        listRecent: store.listRecent,
+        now: NOW,
+      });
+      assert.deepEqual(owner, { kind: "owner", owner: "drive_file", reason: "explicit" });
+    }
+  });
+
+  await asyncCheck("another Drive file and a newer provider cannot hide the original explicitly named entity", async () => {
+    const store = new FakeContextStore();
+    driveEntity(store, "u1", "Original Launch Notes", 20_000, "drive-original");
+    driveEntity(store, "u1", "Resume.pdf", 10_000, "drive-resume");
+    todoistList(store, "u1");
+    const owner = await resolveFollowupOwner("u1", "List the action items from Original Launch Notes.", {
+      listRecent: store.listRecent,
+      now: NOW,
+    });
+    assert.deepEqual(owner, { kind: "owner", owner: "drive_file", reason: "explicit" });
+  });
+
+  await asyncCheck("generic task, project and priority nouns stay inside an explicitly named Drive document", async () => {
+    const store = new FakeContextStore();
+    driveEntity(store, "u1", "Atlas Delivery Brief", 10_000, "drive-atlas");
+    todoistList(store, "u1");
+    for (const text of [
+      "What work is outstanding in Atlas Delivery Brief?",
+      "What still needs doing in Atlas Delivery Brief?",
+      "What are the project priorities in Atlas Delivery Brief?",
+      "List the action items from Atlas Delivery Brief.",
+    ]) {
+      const owner = await resolveFollowupOwner("u1", text, { listRecent: store.listRecent, now: NOW });
+      assert.deepEqual(owner, { kind: "owner", owner: "drive_file", reason: "explicit" }, text);
+    }
+  });
+
+  await asyncCheck("bare pronouns still follow the actual newest active provider entity", async () => {
+    const store = new FakeContextStore();
+    driveEntity(store, "u1", "Older Drive Brief", 10_000, "drive-older");
+    todoistActed(store, "u1");
+    const owner = await resolveFollowupOwner("u1", "Who owns it?", {
+      listRecent: store.listRecent,
+      now: NOW,
+    });
+    assert.deepEqual(owner, { kind: "owner", owner: "todoist_task", reason: "context" });
+  });
+
+  await asyncCheck("an explicit provider noun outside a known Drive title prevents Drive stealing", async () => {
+    const cases = [
+      "Show Slack messages about Release Evidence",
+      "Find Gmail email about Release Evidence",
+      "Show Calendar events about Release Evidence",
+      "Add Release Evidence to Todoist",
+      "Create an Asana task for Release Evidence",
+      "Update the Notion page about Release Evidence",
+    ];
+    for (const text of cases) {
+      const store = new FakeContextStore();
+      driveEntity(store, "u1", "Release Evidence", 10_000, "drive-release-evidence");
+      const owner = await resolveFollowupOwner("u1", text, { listRecent: store.listRecent, now: NOW });
+      assert.notEqual(owner.kind === "owner" ? owner.owner : owner.kind, "drive_file", text);
+    }
   });
 
   console.log("arbitration: routing through the REAL cascade");

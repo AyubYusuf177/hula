@@ -30,12 +30,14 @@ import {
   connectGmail,
   connectAsana,
   connectGoogleCalendar,
+  connectGoogleDrive,
   connectTodoist,
   connectNotion,
   connectSlack,
   disconnectGmail,
   disconnectAsana,
   disconnectGoogleCalendar,
+  disconnectGoogleDrive,
   disconnectTodoist,
   disconnectNotion,
   disconnectSlack,
@@ -45,7 +47,9 @@ import {
   AsanaNotConfiguredError,
   GmailNotConfiguredError,
   GOOGLE_CALENDAR_PROVIDER,
+  GOOGLE_DRIVE_PROVIDER,
   GoogleCalendarNotConfiguredError,
+  GoogleDriveNotConfiguredError,
   MissingApiUrlError,
   TODOIST_PROVIDER,
   TodoistNotConfiguredError,
@@ -95,6 +99,8 @@ type ConnectStarter = (
 const CONNECT_STARTERS: Record<string, ConnectStarter | undefined> = {
   [GOOGLE_CALENDAR_PROVIDER]: (token, appReturnUrl) =>
     connectGoogleCalendar(token, { appReturnUrl }),
+  [GOOGLE_DRIVE_PROVIDER]: (token, appReturnUrl) =>
+    connectGoogleDrive(token, { appReturnUrl }),
   [GMAIL_PROVIDER]: (token, appReturnUrl) => connectGmail(token, { appReturnUrl }),
   [TODOIST_PROVIDER]: (token, appReturnUrl) => connectTodoist(token, { appReturnUrl }),
   [ASANA_PROVIDER]: (token, appReturnUrl) => connectAsana(token, { appReturnUrl }),
@@ -107,6 +113,7 @@ const DISCONNECTERS: Record<
   ((token: string) => Promise<{ ok: boolean; changed: boolean }>) | undefined
 > = {
   [GOOGLE_CALENDAR_PROVIDER]: disconnectGoogleCalendar,
+  [GOOGLE_DRIVE_PROVIDER]: disconnectGoogleDrive,
   [GMAIL_PROVIDER]: disconnectGmail,
   [TODOIST_PROVIDER]: disconnectTodoist,
   [ASANA_PROVIDER]: disconnectAsana,
@@ -330,6 +337,7 @@ export default function IntegrationsScreen() {
       if (__DEV__) console.warn('[Integrations] connect failed:', err);
       const message =
         err instanceof GoogleCalendarNotConfiguredError ||
+        err instanceof GoogleDriveNotConfiguredError ||
         err instanceof GmailNotConfiguredError ||
         err instanceof TodoistNotConfiguredError
         || err instanceof AsanaNotConfiguredError

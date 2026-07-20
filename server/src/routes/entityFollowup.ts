@@ -3,6 +3,7 @@ import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
 import { handleNotionConversation } from "../integrations/providers/notion/conversation";
 import { handleSlackConversation } from "../integrations/providers/slack/conversation";
+import { handleGoogleDriveConversation } from "../integrations/providers/googleDrive/conversation";
 import { logger } from "../utils/logger";
 import {
   isDestructiveFollowup,
@@ -36,6 +37,7 @@ import {
 export interface HandlerResult {
   handled: boolean;
   reply?: string;
+  routeSource?: string;
 }
 
 export interface EntityFollowupDeps extends ArbiterDeps {
@@ -45,6 +47,7 @@ export interface EntityFollowupDeps extends ArbiterDeps {
   asanaRead?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   notion?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   slack?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  drive?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
 }
 
 /**
@@ -116,6 +119,11 @@ export async function handleEntityFollowup(
   if (owner.owner === "slack_entity") {
     logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
     return (deps.slack ?? ((u, t) => handleSlackConversation(u, t, { arbitrated: true })))(userId, text);
+  }
+  if (owner.owner === "drive_file") {
+    logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+    const result = await (deps.drive ?? ((u, t) => handleGoogleDriveConversation(u, t, { arbitrated: true })))(userId, text);
+    return result.handled ? { ...result, routeSource: "drive" } : result;
   }
 
   if (owner.owner !== "todoist_task") {

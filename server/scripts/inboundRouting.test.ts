@@ -124,6 +124,7 @@ function router(over: InboundRouterDeps = {}): InboundRouterDeps {
     asanaRead: decline,
     notion: decline,
     slack: decline,
+    drive: decline,
     pendingReprompt: decline,
     ...over,
   };
@@ -276,6 +277,10 @@ check("order: the cascade order is pinned", () => {
     "entityFollowup",
     // Section 22: explicit Slack nouns and #channels win before document/task providers.
     "slack",
+    // Section 23: explicit Google Drive/Docs semantics and Drive-owned entity
+    // follow-ups are considered before document/task providers. Its provider
+    // gate declines generic file/document nouns and every named provider below.
+    "drive",
     // Section 21: explicit and context-owned Notion content is extracted before
     // task providers; its semantic provider gate declines their domains.
     "notion",
@@ -1050,6 +1055,84 @@ asyncCheck("preserved: Gmail draft/send/reply flows still route correctly", asyn
     const deps = router({ [handler]: async () => ({ handled: true, reply: "ok" }) });
     const r = await routeInboundText(USER, text, deps);
     assert.equal(r?.source, handler, `"${text}" must route to ${handler}`);
+  }
+});
+
+asyncCheck("Section 23 routing matrix keeps Drive and every neighbouring provider isolated", async () => {
+  const cases: Array<[string, keyof InboundRouterDeps]> = [
+    ["Remind me in 2 minutes to check the oven.", "reminder"],
+    ["Add buy milk to Todoist.", "todoistWrite"],
+    ["Create an Asana task called Review onboarding.", "asanaWrite"],
+    ["Draft an email to Sarah saying launch moved.", "gmailWrite"],
+    ["What meetings do I have tomorrow?", "calendar"],
+    ["Update my Notion page called Launch Plan.", "notion"],
+    ["Show me the latest messages in #all-hula.", "slack"],
+    ["Show me my latest Google Docs.", "drive"],
+    ["What is the budget in Hula Drive Test?", "drive"],
+  ];
+  for (const [text, expected] of cases) {
+    const calls: string[] = [];
+    const deps = router({
+      [expected]: async () => { calls.push(expected); return { handled: true, reply: "grounded" }; },
+    });
+    const result = await routeInboundText(`${USER}-s23`, text, deps);
+    assert.equal(result?.source, expected, text);
+    assert.deepEqual(calls, [expected], text);
+  }
+});
+
+asyncCheck("Section 23 explicit provider nouns outside a known Drive title keep their route source", async () => {
+  const driveContext: ActionProposalView = {
+    id: "drive-context-release-evidence",
+    provider: "google_drive",
+    actionId: "drive.entityContext",
+    status: "proposed",
+    riskLevel: "read",
+    confirmationRequired: false,
+    previewText: "Drive entity context.",
+    input: {
+      kind: "drive_entity",
+      ref: {
+        fileId: "drive-release-evidence",
+        name: "Release Evidence",
+        mimeType: "application/vnd.google-apps.document",
+        ownerNames: [],
+        modifiedTime: "2026-07-14T12:00:00.000Z",
+        parentIds: [],
+        webViewLink: "https://docs.google.com/document/d/drive-release-evidence/edit",
+        driveId: null,
+        contentAvailability: "google_doc",
+      },
+      contextEstablishedAt: NOW.getTime() - 10_000,
+    },
+    expiresAt: new Date(NOW.getTime() + 30 * 60 * 1000).toISOString(),
+    confirmedAt: null,
+    rejectedAt: null,
+    executedAt: null,
+    createdAt: new Date(NOW.getTime() - 10_000).toISOString(),
+  };
+  const listRecent = async (_userId: string, actionId: string) =>
+    actionId === "drive.entityContext" ? [driveContext] : [];
+  const cases: Array<[string, keyof InboundRouterDeps]> = [
+    ["Show Slack messages about Release Evidence.", "slack"],
+    ["Find Gmail email about Release Evidence.", "gmailSearch"],
+    ["Show Calendar events about Release Evidence.", "calendar"],
+    ["Add Release Evidence to Todoist.", "todoistWrite"],
+    ["Create an Asana task for Release Evidence.", "asanaWrite"],
+    ["Update the Notion page about Release Evidence.", "notion"],
+  ];
+  for (const [text, expected] of cases) {
+    const deps = router({
+      entityFollowup: (userId, value) => handleEntityFollowup(userId, value, {
+        listRecent,
+        now: NOW,
+        drive: async () => ({ handled: true, reply: "Drive stole the request." }),
+      }),
+      [expected]: async () => ({ handled: true, reply: `handled by ${expected}` }),
+    });
+    const result = await routeInboundText(`${USER}-explicit-provider`, text, deps);
+    assert.equal(result?.source, expected, text);
+    assert.equal(result?.reply, `handled by ${expected}`, text);
   }
 });
 
