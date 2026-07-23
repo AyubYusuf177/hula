@@ -105,6 +105,7 @@ function router(over: InboundRouterDeps = {}): InboundRouterDeps {
     memory: decline,
     reminder: decline,
     confirmation: decline,
+    outlookMail: decline,
     gmailClarify: decline,
     gmailDraftFollowup: decline,
     gmailDraftLifecycle: decline,
@@ -267,16 +268,25 @@ check("order: the cascade order is pinned", () => {
     // A carrier keyword is addressed to the network, not to Hula. Nothing
     // downstream can safely interpret one, so nothing downstream sees one.
     "transportKeyword",
-    "memory",
-    "reminder",
+    // A typed correction to a fresh mail proposal must atomically retire the old
+    // send before a generic "don't send it" can be classified as cancellation.
+    "mailProposalRevision",
     "confirmation",
     // Cross-provider follow-up arbitration. Above every provider handler because
     // "the second one" means whatever the last grounded list was about — no fixed
     // handler ORDER can decide that, so the highest handler would otherwise win
     // every ambiguous pronoun forever.
     "entityFollowup",
+    "memory",
+    "reminder",
+    // Explicit Teams chat/channel requests fail honestly after the arbiter
+    // declines them and before stale Slack context can claim the request.
+    "teamsUnsupported",
     // Section 22: explicit Slack nouns and #channels win before document/task providers.
     "slack",
+    // Section 24: OneDrive/Drive coexistence is resolved before either file
+    // provider can win by connection order.
+    "oneDrive",
     // Section 23: explicit Google Drive/Docs semantics and Drive-owned entity
     // follow-ups are considered before document/task providers. Its provider
     // gate declines generic file/document nouns and every named provider below.
@@ -288,6 +298,9 @@ check("order: the cascade order is pinned", () => {
     // Todoist task gate; both Asana handlers still decline non-Asana intents.
     "asanaWrite",
     "asanaRead",
+    // Section 24: unified Outlook handler also arbitrates ambiguous dual-provider
+    // mail before the Gmail-specific handlers can win by connection order.
+    "outlookMail",
     "gmailClarify",
     "gmailDraftFollowup",
     "gmailDraftLifecycle",
@@ -300,6 +313,9 @@ check("order: the cascade order is pinned", () => {
     "todoistUndo",
     "todoistWrite",
     "todoistRead",
+    // Section 24: Outlook/Google calendar coexistence is resolved before the
+    // Google-specific calendar handlers.
+    "outlookCalendar",
     "calendarWrite",
     "gmailWrite",
     "actionIntent",
@@ -316,7 +332,7 @@ check("order: the cascade order is pinned", () => {
   ]);
 });
 
-asyncCheck("order: memory and reminders keep absolute priority", async () => {
+asyncCheck("order: explicit memory and reminders keep priority after typed entity arbitration declines them", async () => {
   for (const first of ["memory", "reminder"] as const) {
     const deps = router({
       [first]: async () => ({ handled: true, reply: "handled by " + first }),

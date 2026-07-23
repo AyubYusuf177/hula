@@ -163,6 +163,30 @@ export async function getActiveProposal(
 }
 
 /**
+ * Return a just-resolved confirmable proposal so a repeated standalone Yes/No
+ * gets an idempotent receipt instead of falling through to the general brain.
+ * This is read-only and deliberately bounded to the immediate confirmation UX.
+ */
+export async function getRecentResolvedProposal(
+  userId: string,
+  maxAgeMs = 2 * 60 * 1_000,
+): Promise<ActionProposalView | null> {
+  const row = await getPrisma().actionProposal.findFirst({
+    where: {
+      userId,
+      confirmationRequired: true,
+      status: { in: ["executed", "failed", "rejected", "cancelled"] },
+    },
+    orderBy: { createdAt: "desc" },
+    select: PROPOSAL_SELECT,
+  });
+  if (!row) return null;
+  const view = toView(row as ProposalRow);
+  const resolvedAt = Date.parse(view.executedAt ?? view.rejectedAt ?? view.confirmedAt ?? view.createdAt);
+  return Number.isFinite(resolvedAt) && Date.now() - resolvedAt <= maxAgeMs ? view : null;
+}
+
+/**
  * Return the most recent `proposed` proposal for a user with a specific
  * `actionId`, or null — WITHOUT auto-expiring it (the caller inspects `expiresAt`
  * and decides). Used by the Gmail clarification flow to find its own pending
@@ -242,6 +266,32 @@ export async function expireProposal(
     where: { id: proposalId, userId, status: "proposed" },
     data: { status: "expired" },
   });
+}
+
+/**
+ * Atomically retire a still-live proposal because the user revised it before
+ * confirmation. This races safely with confirmation: exactly one transition can
+ * win from `proposed`, so a superseded send can never execute after its content
+ * has been converted into a draft.
+ */
+export async function supersedeProposal(
+  userId: string,
+  proposalId: string,
+): Promise<boolean> {
+  const now = new Date();
+  const result = await getPrisma().actionProposal.updateMany({
+    where: {
+      id: proposalId,
+      userId,
+      status: "proposed",
+      expiresAt: { gt: now },
+    },
+    data: {
+      status: "cancelled",
+      rejectedAt: now,
+    },
+  });
+  return result.count === 1;
 }
 
 /** Get one proposal owned by the user, or null. Never returns others' rows. */

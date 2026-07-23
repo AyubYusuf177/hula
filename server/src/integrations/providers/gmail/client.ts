@@ -1,7 +1,7 @@
 import { getPrisma } from "../../../db/prisma";
 import { logger } from "../../../utils/logger";
 import { TokenVaultConfigError } from "../../tokenVault";
-import { readCredentialSecrets, updateAccessToken } from "../../credentials";
+import { readCredentialSecrets, storeRefreshedCredential } from "../../credentials";
 import { getGmailOAuthConfig, refreshAccessToken, type FetchLike } from "./oauth";
 import { GMAIL_PROVIDER } from "./types";
 
@@ -326,10 +326,7 @@ async function refreshConnectionAccessToken(
   try {
     const config = getGmailOAuthConfig();
     const refreshed = await refreshAccessToken({ config, refreshToken, fetchImpl });
-    const newExpiry = refreshed.expiresIn
-      ? new Date(Date.now() + refreshed.expiresIn * 1000)
-      : null;
-    await updateAccessToken(connectionId, refreshed.accessToken, newExpiry);
+    await storeRefreshedCredential(connectionId, refreshed);
     return refreshed.accessToken;
   } catch (err) {
     const message = err instanceof Error ? err.message : "";
@@ -337,7 +334,7 @@ async function refreshConnectionAccessToken(
     const reason: GmailErrorReason = isInvalidGrant
       ? "invalid_grant"
       : "token_refresh_failed";
-    await markConnection(connectionId, "expired");
+    if (isInvalidGrant) await markConnection(connectionId, "expired");
     // Redacted — never surface the underlying token/secret detail.
     logProviderError("token.refresh", new GmailError(reason), connectionId);
     throw new GmailError(reason, "Failed to refresh Gmail access token");
@@ -351,10 +348,27 @@ async function refreshConnectionAccessToken(
 export async function getValidGmailAccessToken(
   connectionId: string,
   fetchImpl?: FetchLike,
+  deps: {
+    getStatus?: (connectionId: string) => Promise<string | null>;
+    readSecrets?: typeof readCredentialSecrets;
+  } = {},
 ): Promise<string> {
+  const status = await (deps.getStatus ?? (async (id: string) => {
+    const row = await getPrisma().integrationConnection.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    return row?.status ?? null;
+  }))(connectionId);
+  if (!status || status === "disconnected" || status === "revoked") {
+    throw new GmailError("not_connected", "Gmail connection is not active");
+  }
+  if (status === "expired") {
+    throw new GmailError("invalid_grant", "Gmail authorization must be renewed");
+  }
   let secrets;
   try {
-    secrets = await readCredentialSecrets(connectionId);
+    secrets = await (deps.readSecrets ?? readCredentialSecrets)(connectionId);
   } catch (err) {
     if (err instanceof TokenVaultConfigError) {
       logProviderError("credential.decrypt", new GmailError("credential_decrypt_failed"), connectionId);

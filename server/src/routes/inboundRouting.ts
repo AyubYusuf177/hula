@@ -30,6 +30,12 @@ import { handleAsanaWrite } from "../integrations/providers/asana/asanaActions";
 import { handleNotionConversation } from "../integrations/providers/notion/conversation";
 import { handleSlackConversation } from "../integrations/providers/slack/conversation";
 import { handleGoogleDriveConversation } from "../integrations/providers/googleDrive/conversation";
+import {
+  handleOutlookMailConversation,
+  handleOutlookMailProposalRevision,
+} from "../integrations/providers/microsoft/mailConversation";
+import { handleOutlookCalendarConversation } from "../integrations/providers/microsoft/calendarConversation";
+import { handleOneDriveConversation } from "../integrations/providers/microsoft/oneDriveConversation";
 import { handleTransportKeyword } from "../channels/transportKeywords";
 import { handleEntityFollowup } from "./entityFollowup";
 import { handleMemoryCommand } from "../users/memory";
@@ -70,8 +76,13 @@ export interface InboundRouterDeps {
   memory?: Handler;
   reminder?: Handler;
   confirmation?: Handler;
+  mailProposalRevision?: Handler;
+  teamsUnsupported?: Handler;
   entityFollowup?: Handler;
   gmailClarify?: Handler;
+  outlookMail?: Handler;
+  outlookCalendar?: Handler;
+  oneDrive?: Handler;
   gmailDraftFollowup?: Handler;
   gmailDraftLifecycle?: Handler;
   gmailCommand?: Handler;
@@ -115,12 +126,13 @@ export interface RoutedReply {
  *    brain, which fabricated "Cancelled — no worries. Both tasks left as they were."
  *    No such tasks existed. Nothing downstream can safely interpret a transport
  *    command, so nothing downstream ever sees one.
- *  - `memory` and `reminder` keep absolute priority over the CONTENT handlers — they
- *    are the user's own stored data and must never be reinterpreted as an email or
- *    calendar request.
- *  - `confirmation` must precede every write handler, so "no, cancel" always
+ *  - `mailProposalRevision` runs immediately before confirmation, but is inert
+ *    unless a fresh typed mail-send proposal exists and the message explicitly
+ *    revises its provider/operation. It atomically retires the old proposal first,
+ *    so "make it a draft" cannot leave a send armed for a delayed Yes.
+ *  - `confirmation` must precede every ordinary write handler, so "no, cancel" always
  *    abandons a pending action and can never be re-read as a fresh command.
- *  - `entityFollowup` sits directly BELOW `confirmation` and ABOVE every provider
+ *  - `entityFollowup` sits directly BELOW `confirmation` and ABOVE memory and every provider
  *    handler. A bare follow-up ("the second one", "change its priority", "it") has
  *    no meaning of its own — it means whatever the last grounded list was about —
  *    so no fixed handler ORDER can route it correctly. Whoever sits highest would
@@ -176,7 +188,7 @@ export interface RoutedReply {
  *    that is really a meeting. "Book a meeting with Sam on Friday" fails the gate at
  *    step one and reaches Calendar untouched; "schedule a project review Friday"
  *    passes the gate but the extractor declines it, and it reaches Calendar too.
- *  - CRUCIALLY, both still sit below `reminder`, which keeps ABSOLUTE priority.
+ *  - CRUCIALLY, both still sit below `reminder`.
  *    "Remind me to call Rob tomorrow" is claimed by the reminder handler and never
  *    reaches Todoist, so established reminder behaviour is untouched.
  *  - `pendingReprompt` is LAST: while a confirmable action is pending, an
@@ -185,13 +197,20 @@ export interface RoutedReply {
 function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
   return [
     { name: "transportKeyword", run: deps.transportKeyword ?? handleTransportKeyword },
-    { name: "memory", run: deps.memory ?? handleMemoryCommand },
-    { name: "reminder", run: deps.reminder ?? handleReminderCommand },
+    { name: "mailProposalRevision", run: deps.mailProposalRevision ?? handleOutlookMailProposalRevision },
     { name: "confirmation", run: deps.confirmation ?? handleActionConfirmation },
     // Cross-provider follow-up arbitration. See the header note: cascade ORDER
     // cannot decide who owns "the second one" — only the last grounded list can.
     { name: "entityFollowup", run: deps.entityFollowup ?? handleEntityFollowup },
+    // Explicit memory/reminder commands are declined by the typed arbiter and
+    // keep their dedicated behavior; provider-owned pronouns are claimed first.
+    { name: "memory", run: deps.memory ?? handleMemoryCommand },
+    { name: "reminder", run: deps.reminder ?? handleReminderCommand },
+    { name: "teamsUnsupported", run: deps.teamsUnsupported ?? handleUnsupportedTeamsRequest },
     { name: "slack", run: deps.slack ?? handleSlackConversation },
+    // Microsoft files arbitrate OneDrive vs Google Drive before either provider
+    // can win by catalog/connection order.
+    { name: "oneDrive", run: deps.oneDrive ?? handleOneDriveConversation },
     // Drive is semantically gated and runs before Notion so an explicit Google
     // Doc can never be claimed as a generic Notion document/page request.
     { name: "drive", run: deps.drive ?? handleGoogleDriveConversation },
@@ -202,6 +221,10 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     // an explicitly named Asana task cannot be claimed by Todoist's task nouns.
     { name: "asanaWrite", run: deps.asanaWrite ?? handleAsanaWrite },
     { name: "asanaRead", run: deps.asanaRead ?? handleAsanaRead },
+    // Unified mail-provider arbitration lives here. Explicit Outlook, selected
+    // Microsoft entities, and sole-provider requests are handled; ambiguous
+    // Gmail+Outlook requests clarify before any Gmail handler can win by order.
+    { name: "outlookMail", run: deps.outlookMail ?? handleOutlookMailConversation },
     { name: "gmailClarify", run: deps.gmailClarify ?? handleGmailClarification },
     { name: "gmailDraftFollowup", run: deps.gmailDraftFollowup ?? handleGmailDraftFollowup },
     { name: "gmailDraftLifecycle", run: deps.gmailDraftLifecycle ?? handleGmailDraftLifecycle },
@@ -212,6 +235,9 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     { name: "todoistUndo", run: deps.todoistUndo ?? handleTodoistUndo },
     { name: "todoistWrite", run: deps.todoistWrite ?? handleTodoistWrite },
     { name: "todoistRead", run: deps.todoistRead ?? handleTodoistRead },
+    // Outlook Calendar owns explicit Microsoft requests and Microsoft event
+    // context; a generic request with both calendars connected clarifies.
+    { name: "outlookCalendar", run: deps.outlookCalendar ?? handleOutlookCalendarConversation },
     { name: "calendarWrite", run: deps.calendarWrite ?? handleCalendarWrite },
     { name: "gmailWrite", run: deps.gmailWrite ?? handleGmailWrite },
     { name: "actionIntent", run: deps.actionIntent ?? handleActionIntent },
@@ -226,6 +252,20 @@ function buildChain(deps: InboundRouterDeps): { name: string; run: Handler }[] {
     { name: "gmailSearch", run: deps.gmailSearch ?? handleGmailSearch },
     { name: "gmailQuestion", run: deps.gmailQuestion ?? handleGmailQuestion },
   ];
+}
+
+/** Teams chat/channel messaging is intentionally outside Section 24. */
+export async function handleUnsupportedTeamsRequest(
+  _userId: string,
+  text: string | undefined,
+): Promise<HandlerResult> {
+  const value = (text ?? "").trim();
+  if (!/\b(?:microsoft\s+)?teams\b/i.test(value)) return { handled: false };
+  if (/\b(?:meeting|call|calendar|schedule|book|invite|join\s+link)\b/i.test(value)) return { handled: false };
+  return {
+    handled: true,
+    reply: "Teams chat and channel messaging aren’t supported yet. I can create a Teams meeting through Outlook Calendar when your Microsoft account supports it.",
+  };
 }
 
 /** The ordered handler names, exported so tests can pin the contract. */

@@ -153,6 +153,7 @@ async function run() {
 
   const gmailId = fake.__seedConnected(USER, "gmail");
   const calId = fake.__seedConnected(USER, "google_calendar");
+  const microsoftId = fake.__seedConnected(USER, "microsoft");
 
   await check("disconnect gmail clears ONLY gmail (calendar untouched)", async () => {
     const changed = await disconnectIntegrationConnection(USER, "gmail");
@@ -166,6 +167,8 @@ async function run() {
     const cal = fake.__conn(USER, "google_calendar");
     assert.equal(cal?.status, "connected", "calendar must stay connected");
     assert.equal(fake.__hasCredential(calId), true, "calendar credential preserved");
+    assert.equal(fake.__conn(USER, "microsoft")?.status, "connected");
+    assert.equal(fake.__hasCredential(microsoftId), true, "Microsoft credential preserved");
   });
 
   await check("disconnect calendar clears ONLY calendar (gmail untouched)", async () => {
@@ -194,6 +197,24 @@ async function run() {
     assert.equal(view.status, "connected");
     assert.notEqual(view.connectedAt, null);
     assert.equal(fake.__conn(USER, "google_calendar")?.status, "connected");
+  });
+
+  await check("disconnect/reconnect Microsoft is provider-scoped and idempotent", async () => {
+    const changed = await disconnectIntegrationConnection(USER, "microsoft");
+    assert.equal(changed, true);
+    assert.equal(fake.__conn(USER, "microsoft")?.status, "disconnected");
+    assert.equal(fake.__hasCredential(microsoftId), false);
+    assert.equal(fake.__conn(USER, "gmail")?.status, "connected");
+
+    const reconnected = await upsertIntegrationConnection(USER, {
+      provider: "microsoft",
+      status: "connected",
+      providerAccountEmail: "microsoft@example.com",
+      grantedScopes: ["User.Read"],
+      capabilities: ["microsoft.identity"],
+    });
+    assert.equal(reconnected.status, "connected");
+    assert.equal(reconnected.providerAccountEmail, "microsoft@example.com");
   });
 
   await check("disconnect with no connection row is a no-op (idempotent)", async () => {

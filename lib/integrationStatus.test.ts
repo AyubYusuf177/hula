@@ -116,6 +116,15 @@ check('view: an explicitly disconnected backend status reports disconnected', ()
   assert.equal(v.accountLabel, null);
 });
 
+check('view: a partial Microsoft grant stays connected but is labeled honestly', () => {
+  const v = deriveIntegrationView(
+    status('microsoft', 'connected', { partial: true }),
+  );
+  assert.equal(v.connected, true);
+  assert.equal(v.partial, true);
+  assert.equal(v.statusLabel, 'Connected with limited access');
+});
+
 check('view: refreshing from connected → disconnected flips the card back', () => {
   // Models the UI re-reading backend truth after a disconnect: same provider,
   // two successive backend reads, the second wins.

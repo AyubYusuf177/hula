@@ -9,6 +9,7 @@ import { googleDriveRouter } from "./routes/googleDrive";
 import { healthRouter } from "./routes/health";
 import { linkSessionsRouter } from "./routes/linkSessions";
 import { meRouter } from "./routes/me";
+import { microsoftRouter } from "./routes/microsoft";
 import { todoistRouter } from "./routes/todoist";
 import { sendblueWebhookRouter } from "./routes/webhooks";
 import { slackEventsRouter, slackRouter } from "./routes/slack";
@@ -31,6 +32,7 @@ export function createApp(): Express {
   app.use(googleCalendarRouter);
   app.use(gmailRouter);
   app.use(googleDriveRouter);
+  app.use(microsoftRouter);
   app.use(todoistRouter);
   app.use(asanaRouter);
   app.use(notionRouter);

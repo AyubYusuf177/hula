@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
-import { Image } from 'expo-image';
 import { useEffect, useRef } from 'react';
 import {
   ActivityIndicator,
@@ -29,6 +28,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { hula } from '@/constants/theme';
 import { authorizationRedirectCopy, type IntegrationProviderConfig } from '@/data/integrations';
 import { deriveSheetCopy, type IntegrationView } from '@/lib/integrationStatus';
+import { IntegrationProviderIcon } from './IntegrationProviderIcon';
 
 const font = hula.typography.fontFamily;
 const SCREEN_H = Dimensions.get('window').height;
@@ -132,7 +132,7 @@ export function IntegrationDetailsSheet({
   const confirmDisconnect = () => {
     Alert.alert(
       provider.disconnectLabel,
-      `Hula will stop reading your ${provider.displayName}. You can reconnect anytime.`,
+      `Hula will disconnect your ${provider.displayName} account and remove its stored access. You can reconnect anytime.`,
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Disconnect', style: 'destructive', onPress: onDisconnect },
@@ -172,12 +172,7 @@ export function IntegrationDetailsSheet({
 
               <View style={styles.identity}>
                 <View style={[styles.bigIcon, !connected && styles.bigIconMuted]}>
-                  <Image
-                    source={provider.iconImage}
-                    style={[styles.bigIconImg, !connected && styles.bigIconImgDim]}
-                    contentFit="contain"
-                    accessibilityLabel={provider.displayName}
-                  />
+                  <IntegrationProviderIcon provider={provider} size={52} dimmed={!connected} />
                 </View>
 
                 <Text style={styles.heading}>{copy.heading}</Text>
@@ -195,7 +190,11 @@ export function IntegrationDetailsSheet({
                   <Text
                     style={[styles.statusText, connected && styles.statusTextConnected]}
                   >
-                    {connected ? 'Connected' : 'Not connected'}
+                    {connected
+                      ? view.partial
+                        ? 'Connected with limited access'
+                        : 'Connected'
+                      : 'Not connected'}
                   </Text>
                 </View>
 
@@ -237,7 +236,7 @@ export function IntegrationDetailsSheet({
                         <ActivityIndicator color={hula.button.solidText} />
                       ) : (
                         <>
-                          <Image source={provider.iconImage} className="h-[18px] w-[18px]" contentFit="contain" />
+                          <IntegrationProviderIcon provider={provider} size={18} />
                           <Text style={styles.connectText}>{provider.connectLabel}</Text>
                         </>
                       )}
@@ -329,13 +328,6 @@ const styles = StyleSheet.create({
   bigIconMuted: {
     backgroundColor: 'rgba(150, 160, 210, 0.05)',
     borderColor: 'rgba(150, 160, 210, 0.12)',
-  },
-  bigIconImg: {
-    width: 52,
-    height: 52,
-  },
-  bigIconImgDim: {
-    opacity: 0.4,
   },
   heading: {
     fontFamily: font.bold,

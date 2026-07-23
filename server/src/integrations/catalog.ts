@@ -14,6 +14,7 @@
 
 /** Stable provider slugs. Used as the `provider` value on DB rows. */
 export type ProviderId =
+  | "microsoft"
   | "google_calendar"
   | "gmail"
   | "google_drive"
@@ -55,6 +56,8 @@ export interface ProviderCatalogEntry {
   defaultScopes: string[];
   /** Capability slugs this provider will unlock once connected. */
   capabilities: string[];
+  /** Capabilities expected from the provider's default consent request. */
+  requiredCapabilities?: string[];
   /** Short human note about the provider's current state / intent. */
   notes: string;
 }
@@ -65,6 +68,47 @@ export interface ProviderCatalogEntry {
  * requests them yet.
  */
 export const PROVIDER_CATALOG: readonly ProviderCatalogEntry[] = [
+  {
+    provider: "microsoft",
+    displayName: "Microsoft 365",
+    category: "productivity",
+    status: "available_readonly",
+    authType: "oauth2",
+    // One delegated Microsoft Graph grant backs the whole Microsoft platform.
+    // Teams and OneDrive write scopes are deliberately absent in Phase 1.
+    defaultScopes: [
+      "openid",
+      "profile",
+      "email",
+      "offline_access",
+      "User.Read",
+      "Mail.ReadWrite",
+      "Mail.Send",
+      "Calendars.ReadWrite",
+      "Files.Read",
+    ],
+    capabilities: [
+      "microsoft.identity",
+      "outlook_mail.read",
+      "outlook_mail.write",
+      "outlook_mail.send",
+      "outlook_calendar.read",
+      "outlook_calendar.write",
+      "onedrive.read",
+      "onedrive.write",
+    ],
+    requiredCapabilities: [
+      "microsoft.identity",
+      "outlook_mail.read",
+      "outlook_mail.write",
+      "outlook_mail.send",
+      "outlook_calendar.read",
+      "outlook_calendar.write",
+      "onedrive.read",
+    ],
+    notes:
+      "Live unified Microsoft 365 integration. One encrypted delegated credential derives Outlook Mail, Outlook Calendar and OneDrive capabilities from the scopes Microsoft actually grants. Teams meeting links use Calendar only; Teams chat and OneDrive writes are not requested.",
+  },
   {
     provider: "google_calendar",
     displayName: "Google Calendar",

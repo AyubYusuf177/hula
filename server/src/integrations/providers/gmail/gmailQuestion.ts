@@ -54,14 +54,22 @@ export function classifyGmailQuestion(text: string | undefined): GmailIntent {
   const trimmed = (text ?? "").trim();
   if (!trimmed) return "none";
   if (!EMAIL_KEYWORD_RE.test(trimmed)) return "none";
+  // Connection-state statements are acknowledgements, not mailbox reads. A bare
+  // provider noun must never silently become "list my latest mail".
+  if (/^gmail\s+(?:is|was|looks|seems)\s+(?:now\s+)?(?:connected|reconnected|disconnected|working|fixed)[.!]?$/i.test(trimmed)) {
+    return "none";
+  }
 
   if (IMPORTANT_RE.test(trimmed)) return "important";
   if (TODAY_RE.test(trimmed)) return "today";
   if (UNREAD_RE.test(trimmed)) return "unread";
   if (LATEST_RE.test(trimmed)) return "latest";
 
-  // A bare "do I have any emails?" defaults to the latest view.
-  return "latest";
+  // A generic email QUESTION/REQUEST defaults to the latest view; a plain status
+  // statement containing only the provider name does not.
+  return /\?|\b(?:show|list|check|fetch|pull up|do i have|what(?:'s| is)|anything|any)\b/i.test(trimmed)
+    ? "latest"
+    : "none";
 }
 
 // --- Formatting (PURE) ---------------------------------------------------

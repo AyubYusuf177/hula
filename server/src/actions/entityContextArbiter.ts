@@ -1,4 +1,5 @@
 import { listRecentProposalsByAction, type ActionProposalView } from "./proposals";
+import { textForProviderMentionDetection } from "../integrations/providerMentions";
 
 /**
  * Cross-provider entity-context arbitration.
@@ -51,8 +52,12 @@ export type EntityKind =
   | "notion_entity"
   | "gmail_email"
   | "gmail_draft"
+  | "outlook_message"
+  | "outlook_draft"
   | "calendar_event"
+  | "outlook_calendar_event"
   | "drive_file"
+  | "onedrive_file"
   | "slack_entity"
   | "memory_item";
 
@@ -64,7 +69,7 @@ export type EntityKind =
  * provider package (and on their handler imports), which is a cycle waiting to
  * happen. The ids are a stable storage contract, and the tests pin them.
  */
-export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" }[] = [
+export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "gmail_either" | "outlook_either" }[] = [
   { actionId: "drive.unresolvedAmbiguity", kind: "drive_file" },
   { actionId: "drive.lastSelection", kind: "drive_file" },
   { actionId: "drive.entityContext", kind: "drive_file" },
@@ -79,11 +84,18 @@ export const CONTEXT_SOURCES: readonly { actionId: string; kind: EntityKind | "g
   { actionId: "todoist.entityContext", kind: "todoist_task" },
   { actionId: "calendar.lastSelection", kind: "calendar_event" },
   { actionId: "calendar.entityContext", kind: "calendar_event" },
+  { actionId: "microsoft.calendar.lastSelection", kind: "outlook_calendar_event" },
+  { actionId: "microsoft.calendar.entityContext", kind: "outlook_calendar_event" },
   // Gmail stores messages AND drafts under ONE selection id, distinguished by the
   // payload's `itemKind` — so the row's own data decides which it is.
   { actionId: "email.lastSelection", kind: "gmail_either" },
   { actionId: "email.entityContext", kind: "gmail_email" },
   { actionId: "email.lastDraft", kind: "gmail_draft" },
+  { actionId: "microsoft.mail.lastSelection", kind: "outlook_either" },
+  { actionId: "microsoft.mail.entityContext", kind: "outlook_message" },
+  { actionId: "microsoft.mail.lastDraft", kind: "outlook_draft" },
+  { actionId: "microsoft.onedrive.lastSelection", kind: "onedrive_file" },
+  { actionId: "microsoft.onedrive.entityContext", kind: "onedrive_file" },
 ];
 
 // --- Follow-up shape (PURE) ----------------------------------------------
@@ -111,7 +123,7 @@ export function isFollowupShape(text: string | undefined): boolean {
   // Named read follow-ups can still refer to the immediately shown entity:
   // “What is Team Text?” and “Give me the link to Team Text.” Preserve the
   // existing context arbitration instead of sending these to the brain.
-  if (/^(?:what(?:'s| is)|tell me about|give me (?:the )?link to)\b/.test(t)) return true;
+  if (/^(?:what(?:['’]s| is)|tell me about|give me (?:the )?link(?:\s+to)?|open (?:the )?link)\b/.test(t)) return true;
   return false;
 }
 
@@ -128,7 +140,10 @@ export function isFollowupShape(text: string | undefined): boolean {
 export function explicitEntityKinds(text: string | undefined): EntityKind[] {
   const t = (text ?? "").trim().toLowerCase();
   if (!t) return [];
+  const providerText = textForProviderMentionDetection(t);
   const kinds = new Set<EntityKind>();
+  const explicitOutlook = /\b(?:outlook(?!\s+(?:calendar|meetings?|events?))|microsoft\s*(?:365)?\s*(?:mail|email|inbox)|hotmail)\b/.test(providerText);
+  const explicitGmail = /\bgmail\b/.test(providerText);
 
   if (/\bslack\b|#[a-z0-9_-]+|\bslack\s+(?:channel|message|thread|workspace)\b/.test(t)) {
     kinds.add("slack_entity");
@@ -137,13 +152,16 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
   if (/\bgoogle\s+drive\b|\bgoogle\s+docs?\b|\b(?:docs|drive)\.google\.com\b/.test(t)) {
     kinds.add("drive_file");
   }
+  if (/\bone\s*drive\b|\b(?:microsoft|office\s*365)\s+(?:files?|folders?|documents?|docs?)\b/.test(t)) {
+    kinds.add("onedrive_file");
+  }
 
   // An explicit provider name wins over generic task nouns.
   if (/\basana\b/.test(t)) {
     kinds.add("asana_task");
   }
   if (/\bnotion\b|\b(?:page|record|data source|database|block|comment)\s+(?:in\s+)?notion\b/.test(t)) kinds.add("notion_entity");
-  if (!/\basana\b/.test(t) && (
+  if (!/\basana\b/.test(t) && !/\bone\s*drive\b|\bgoogle\s+drive\b|\bgoogle\s+docs?\b/.test(t) && (
     /\bpriority\b/.test(t) ||
     /\btasks?\b/.test(t) ||
     /\bto-?dos?\b/.test(t) ||
@@ -156,19 +174,20 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
     kinds.add("todoist_task");
   }
 
-  // Gmail drafts: composition nouns.
-  if (
+  // Draft/message nouns are shared by Gmail and Outlook. Without an explicit
+  // provider, fresh typed context decides instead of defaulting to Gmail.
+  if (explicitGmail && (
     /\bdrafts?\b/.test(t) ||
     /\bsubject\b/.test(t) ||
     /\brecipients?\b/.test(t) ||
     /\b(?:email|message)\s+body\b/.test(t) ||
     /\bbody\b/.test(t)
-  ) {
+  )) {
     kinds.add("gmail_draft");
   }
 
   // Gmail messages: inbox nouns and mail-specific verbs.
-  if (!/\bslack\b/.test(t) && (
+  if (explicitGmail && !/\bslack\b/.test(t) && (
     /\breply\b/.test(t) ||
     /\bemails?\b/.test(t) ||
     /\binbox\b/.test(t) ||
@@ -179,15 +198,22 @@ export function explicitEntityKinds(text: string | undefined): EntityKind[] {
     kinds.add("gmail_email");
   }
 
+  if (explicitOutlook) {
+    if (/\bdrafts?\b/.test(t)) kinds.add("outlook_draft");
+    else kinds.add("outlook_message");
+  }
+
   // Calendar: event nouns.
-  if (
+  const explicitMicrosoftCalendar = /\b(?:outlook|microsoft(?:\s*365)?|office\s*365)\s+(?:calendar|meetings?|events?)\b|\bteams\s+(?:meeting|call)\b/.test(t);
+  if (explicitMicrosoftCalendar) kinds.add("outlook_calendar_event");
+  if (!explicitMicrosoftCalendar && (
     /\bmeetings?\b/.test(t) ||
     /\bevents?\b/.test(t) ||
     /\battendees?\b/.test(t) ||
     /\bcalendars?\b/.test(t) ||
     /\bgoogle\s+meet\b/.test(t) ||
     /\binvites?\b/.test(t)
-  ) {
+  )) {
     kinds.add("calendar_event");
   }
 
@@ -224,7 +250,13 @@ export function isDestructiveFollowup(text: string | undefined): boolean {
 export function toProviderFamilies(kinds: readonly EntityKind[]): string[] {
   const families = new Set<string>();
   for (const kind of kinds) {
-    families.add(kind === "gmail_email" || kind === "gmail_draft" ? "gmail" : kind);
+    families.add(
+      kind === "gmail_email" || kind === "gmail_draft"
+        ? "gmail"
+        : kind === "outlook_message" || kind === "outlook_draft"
+          ? "outlook"
+          : kind,
+    );
   }
   // `memory_item` is its own family: "delete that memory" vs a task is a genuine
   // cross-provider question, not a within-Gmail nuance.
@@ -249,9 +281,14 @@ export interface ArbiterDeps {
 }
 
 /** PURE: read Gmail's selection payload to tell messages from drafts. */
-function gmailKindFromRow(row: ActionProposalView): EntityKind {
+function mailKindFromRow(row: ActionProposalView, source: "gmail_either" | "outlook_either"): EntityKind {
   const itemKind = (row.input as { itemKind?: unknown } | null)?.itemKind;
-  return itemKind === "drafts" ? "gmail_draft" : "gmail_email";
+  if (source === "gmail_either") return itemKind === "drafts" ? "gmail_draft" : "gmail_email";
+  const items = (row.input as { items?: unknown } | null)?.items;
+  const firstKind = Array.isArray(items) && items[0] && typeof items[0] === "object"
+    ? (items[0] as { itemKind?: unknown }).itemKind
+    : null;
+  return firstKind === "draft" ? "outlook_draft" : "outlook_message";
 }
 
 function contextNames(row: ActionProposalView, actionId: string): string[] {
@@ -267,6 +304,38 @@ function contextNames(row: ActionProposalView, actionId: string): string[] {
     const ref = (row.input as { ref?: unknown } | null)?.ref;
     const name = ref && typeof ref === "object" ? (ref as { name?: unknown }).name : null;
     return typeof name === "string" && name.trim() ? [name.trim()] : [];
+  }
+  if (actionId === "microsoft.mail.lastSelection") {
+    const items = (row.input as { items?: unknown } | null)?.items;
+    if (!Array.isArray(items)) return [];
+    return items.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const raw = item as { subject?: unknown; senderName?: unknown };
+      return [raw.subject, raw.senderName].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    }).slice(0, 40);
+  }
+  if (actionId === "microsoft.mail.entityContext" || actionId === "microsoft.mail.lastDraft") {
+    const ref = (row.input as { ref?: unknown } | null)?.ref;
+    if (!ref || typeof ref !== "object") return [];
+    const raw = ref as { subject?: unknown; senderName?: unknown };
+    return [raw.subject, raw.senderName].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  }
+  if (actionId === "microsoft.calendar.lastSelection" || actionId === "microsoft.onedrive.lastSelection") {
+    const items = (row.input as { items?: unknown } | null)?.items;
+    if (!Array.isArray(items)) return [];
+    return items.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const raw = item as { subject?: unknown; name?: unknown };
+      const name = typeof raw.subject === "string" ? raw.subject : typeof raw.name === "string" ? raw.name : null;
+      return name?.trim() ? [name.trim()] : [];
+    }).slice(0, 20);
+  }
+  if (actionId === "microsoft.calendar.entityContext" || actionId === "microsoft.onedrive.entityContext") {
+    const ref = (row.input as { ref?: unknown } | null)?.ref;
+    if (!ref || typeof ref !== "object") return [];
+    const raw = ref as { subject?: unknown; name?: unknown };
+    const name = typeof raw.subject === "string" ? raw.subject : typeof raw.name === "string" ? raw.name : null;
+    return name?.trim() ? [name.trim()] : [];
   }
   return [];
 }
@@ -296,13 +365,17 @@ export async function loadGroundedContexts(
     }
     for (const row of rows) {
       if (Date.parse(row.expiresAt) <= nowMs) continue;
+      if (source.actionId === "microsoft.mail.lastDraft" && row.input?.kind === "outlook_entity_invalidated") break;
+      if (row.input?.kind === "outlook_entity_invalidated") continue;
       const payloadAt = (row.input as { contextEstablishedAt?: unknown } | null)?.contextEstablishedAt;
       const at = typeof payloadAt === "number" && Number.isFinite(payloadAt)
         ? payloadAt
         : Date.parse(row.createdAt);
       if (!Number.isFinite(at)) continue;
       found.push({
-        kind: source.kind === "gmail_either" ? gmailKindFromRow(row) : source.kind,
+        kind: source.kind === "gmail_either" || source.kind === "outlook_either"
+          ? mailKindFromRow(row, source.kind)
+          : source.kind,
         actionId: source.actionId,
         at,
         names: contextNames(row, source.actionId),
@@ -310,7 +383,15 @@ export async function loadGroundedContexts(
     }
   }
 
-  return found.sort((a, b) => b.at - a.at);
+  return found.sort((a, b) => {
+    const recency = b.at - a.at;
+    if (recency !== 0) return recency;
+    // A list and the entity selected from it are often persisted in the same
+    // millisecond. On that exact tie, the concrete active entity must outrank
+    // the preserved candidate list or factual follow-ups can lose ownership.
+    const active = (actionId: string) => actionId.endsWith(".entityContext") ? 1 : 0;
+    return active(b.actionId) - active(a.actionId);
+  });
 }
 
 // --- Arbitration ---------------------------------------------------------
@@ -354,16 +435,20 @@ function namedContextOwner(text: string, contexts: GroundedContext[]): NamedCont
 
 /** Provider brands/signals only; generic content nouns deliberately do not count. */
 function explicitProviderKinds(text: string): EntityKind[] {
+  const providerText = textForProviderMentionDetection(text);
   const kinds = new Set<EntityKind>();
-  if (/\bslack\b|#[a-z0-9_-]+/i.test(text)) kinds.add("slack_entity");
-  if (/\bgoogle\s+drive\b|\bgoogle\s+docs?\b|\b(?:docs|drive)\.google\.com\b/i.test(text)) kinds.add("drive_file");
-  if (/\basana\b/i.test(text)) kinds.add("asana_task");
-  if (/\bnotion\b/i.test(text)) kinds.add("notion_entity");
-  if (/\btodoist\b/i.test(text)) kinds.add("todoist_task");
-  if (/\bgmail\b|\bemails?\b|\binbox\b/i.test(text)) kinds.add("gmail_email");
-  if (/\bcalendar\b|\bmeetings?\b|\bevents?\b/i.test(text)) kinds.add("calendar_event");
-  if (/\bremind(?:er)?\b/i.test(text)) kinds.add("memory_item");
-  if (/\bmemor(?:y|ies)\b/i.test(text)) kinds.add("memory_item");
+  if (/\bslack\b|#[a-z0-9_-]+/i.test(providerText)) kinds.add("slack_entity");
+  if (/\bgoogle\s+drive\b|\bgoogle\s+docs?\b|\b(?:docs|drive)\.google\.com\b/i.test(providerText)) kinds.add("drive_file");
+  if (/\bone\s*drive\b|\b(?:microsoft|office\s*365)\s+(?:files?|folders?|documents?|docs?)\b/i.test(providerText)) kinds.add("onedrive_file");
+  if (/\basana\b/i.test(providerText)) kinds.add("asana_task");
+  if (/\bnotion\b/i.test(providerText)) kinds.add("notion_entity");
+  if (/\btodoist\b/i.test(providerText)) kinds.add("todoist_task");
+  if (/\bgmail\b/i.test(providerText)) kinds.add("gmail_email");
+  if (/\b(?:outlook(?!\s+(?:calendar|meetings?|events?))|microsoft\s*(?:365)?\s*(?:mail|email|inbox)|hotmail)\b/i.test(providerText)) kinds.add("outlook_message");
+  if (/\b(?:outlook|microsoft(?:\s*365)?|office\s*365)\s+(?:calendar|meetings?|events?)\b|\bteams\s+(?:meeting|call)\b/i.test(providerText)) kinds.add("outlook_calendar_event");
+  else if (/\bcalendar\b|\bmeetings?\b|\bevents?\b/i.test(providerText)) kinds.add("calendar_event");
+  if (/\bremind(?:er)?\b/i.test(providerText)) kinds.add("memory_item");
+  if (/\bmemor(?:y|ies)\b/i.test(providerText)) kinds.add("memory_item");
   return [...kinds];
 }
 
@@ -387,8 +472,12 @@ export function conflictClarification(kinds: readonly EntityKind[]): string {
     notion_entity: "Notion content",
     gmail_email: "an email",
     gmail_draft: "an email draft",
+    outlook_message: "an Outlook message",
+    outlook_draft: "an Outlook draft",
     calendar_event: "a calendar event",
+    outlook_calendar_event: "an Outlook calendar event",
     drive_file: "a Google Drive file",
+    onedrive_file: "a OneDrive file",
     slack_entity: "Slack content",
     memory_item: "something I’ve remembered",
   };
@@ -413,6 +502,12 @@ export async function resolveFollowupOwner(
   deps: ArbiterDeps = {},
 ): Promise<FollowupOwner> {
   const value = (text ?? "").trim();
+  // Teams chat/channel messaging is an explicit unsupported provider request,
+  // never a pronoun that stale Slack context may claim. The routing guard
+  // immediately after this arbiter returns the honest limitation.
+  if (/\b(?:microsoft\s+)?teams\b/i.test(value) && !/\b(?:meeting|call|calendar|schedule|book|invite|join\s+link)\b/i.test(value)) {
+    return { kind: "none" };
+  }
   const followup = isFollowupShape(value);
   const mayNameEntity = mayNameGroundedEntity(value);
   const factualQuestion = /^(?:who|what|when|where|why|how|does|is|are|which)\b/i.test(value);
@@ -440,6 +535,7 @@ export async function resolveFollowupOwner(
   const explicit = explicitEntityKinds(semanticValue);
   const families = toProviderFamilies(explicit);
   const explicitlyBrandedElsewhere = explicitProviderKinds(semanticValue).length > 0;
+  const namesSharedDraft = /\bdrafts?\b/i.test(semanticValue) && !explicitlyBrandedElsewhere;
 
   // A non-follow-up reaches this arbiter only because it may contain a proper
   // entity name. Provider words alone (for example “latest Google Docs”) must
@@ -452,8 +548,8 @@ export async function resolveFollowupOwner(
     // explicit provider noun elsewhere in the question still wins.
     if (families.length > 0 && explicitlyBrandedElsewhere) return { kind: "none" };
     const newest = contexts[0];
-    if (factualQuestion && newest?.actionId === "drive.entityContext") {
-      return { kind: "owner", owner: "drive_file", reason: "context" };
+    if (factualQuestion && (newest?.actionId === "drive.entityContext" || newest?.actionId === "microsoft.onedrive.entityContext")) {
+      return { kind: "owner", owner: newest.actionId === "drive.entityContext" ? "drive_file" : "onedrive_file", reason: "context" };
     }
     return { kind: "none" };
   }
@@ -467,12 +563,21 @@ export async function resolveFollowupOwner(
   if (
     factualQuestion &&
     !explicitlyBrandedElsewhere &&
-    contexts[0]?.actionId === "drive.entityContext"
+    (contexts[0]?.actionId === "drive.entityContext" || contexts[0]?.actionId === "microsoft.onedrive.entityContext")
   ) {
-    return { kind: "owner", owner: "drive_file", reason: "context" };
+    return { kind: "owner", owner: contexts[0]?.actionId === "drive.entityContext" ? "drive_file" : "onedrive_file", reason: "context" };
   }
 
   // 2. Cross-provider disagreement inside one message → ask, never guess.
+  // A provider-neutral draft noun still names the mail domain. If the same
+  // request also names an unrelated entity family (for example a task priority),
+  // surface that conflict instead of letting either side steal the mutation.
+  if (namesSharedDraft && families.length > 0 && !families.includes("gmail") && !families.includes("outlook")) {
+    return {
+      kind: "conflict",
+      clarification: conflictClarification([...explicit, "gmail_draft"]),
+    };
+  }
   if (families.length > 1) {
     return { kind: "conflict", clarification: conflictClarification(explicit) };
   }
@@ -485,6 +590,28 @@ export async function resolveFollowupOwner(
     // Same family (e.g. draft + body). Prefer the more specific draft kind.
     const owner = explicit.includes("gmail_draft") ? "gmail_draft" : explicit[0]!;
     return { kind: "owner", owner, reason: "explicit" };
+  }
+
+  // Some entity nouns are shared across providers. They are still stronger than
+  // an unrelated active context: "delete that draft" means the freshest actual
+  // mail draft, not a newer Todoist task or saved memory. Do not assign the noun
+  // to Gmail or Outlook by catalog order; choose only among grounded draft
+  // contexts, and fail closed if equally fresh providers disagree.
+  if (namesSharedDraft) {
+    const draftContexts = contexts.filter(
+      (context) => context.kind === "gmail_draft" || context.kind === "outlook_draft",
+    );
+    const newestDraft = draftContexts[0];
+    if (newestDraft) {
+      const tiedDrafts = draftContexts.filter((context) => context.at === newestDraft.at);
+      if (toProviderFamilies(tiedDrafts.map((context) => context.kind)).length > 1) {
+        return {
+          kind: "conflict",
+          clarification: conflictClarification(tiedDrafts.map((context) => context.kind)),
+        };
+      }
+      return { kind: "owner", owner: newestDraft.kind, reason: "context" };
+    }
   }
 
   // 3. Otherwise: whatever the user is actually looking at.

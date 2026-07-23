@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { hula } from '@/constants/theme';
 import type { IntegrationProviderConfig } from '@/data/integrations';
 import type { IntegrationView } from '@/lib/integrationStatus';
+import { IntegrationProviderIcon } from './IntegrationProviderIcon';
 
 const font = hula.typography.fontFamily;
 
@@ -44,12 +44,7 @@ export function IntegrationCard({
       ]}
     >
       <View style={[styles.iconTile, !connected && styles.iconTileMuted]}>
-        <Image
-          source={provider.iconImage}
-          style={[styles.icon, !connected && styles.iconDim]}
-          contentFit="contain"
-          accessibilityLabel={provider.displayName}
-        />
+        <IntegrationProviderIcon provider={provider} size={32} dimmed={!connected} />
       </View>
 
       <View style={styles.textCol}>
@@ -67,7 +62,9 @@ export function IntegrationCard({
           // Pill replaces the chevron here so the name always has room to fit.
           <View style={styles.connectedPill}>
             <View style={styles.connectedDot} />
-            <Text style={styles.connectedPillText}>Connected</Text>
+            <Text style={styles.connectedPillText}>
+              {view.partial ? 'Limited' : 'Connected'}
+            </Text>
           </View>
         ) : busy ? (
           <>
@@ -133,14 +130,6 @@ const styles = StyleSheet.create({
   iconTileMuted: {
     backgroundColor: 'rgba(150, 160, 210, 0.05)',
     borderColor: 'rgba(150, 160, 210, 0.12)',
-  },
-  icon: {
-    width: 32,
-    height: 32,
-  },
-  iconDim: {
-    // Desaturate the product mark while disconnected so no brand colour pops.
-    opacity: 0.42,
   },
   textCol: {
     flex: 1,

@@ -86,6 +86,27 @@ export async function updateAccessToken(
 }
 
 /**
+ * Persist a provider refresh response in one credential upsert. Google normally
+ * omits refresh_token; omission preserves the encrypted token already stored.
+ * If Google rotates it, the new token is replaced atomically with the access
+ * token rather than being ignored.
+ */
+export async function storeRefreshedCredential(
+  connectionId: string,
+  refreshed: { accessToken: string; refreshToken?: string | null; expiresIn?: number | null },
+  deps: { store?: typeof storeCredentialSecrets; now?: Date } = {},
+): Promise<void> {
+  const now = deps.now ?? new Date();
+  await (deps.store ?? storeCredentialSecrets)(connectionId, {
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken ?? undefined,
+    accessTokenExpiresAt: refreshed.expiresIn
+      ? new Date(now.getTime() + refreshed.expiresIn * 1_000)
+      : null,
+  });
+}
+
+/**
  * Report whether a connection has stored token material, WITHOUT decrypting it.
  * Only booleans are returned — safe for the diagnostic endpoint. Never touches the
  * token vault, so it works even if the encryption key is unavailable.

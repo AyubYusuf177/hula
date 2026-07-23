@@ -140,7 +140,7 @@ check("registry: every action has complete, typed metadata", () => {
   }
 });
 
-check("registry: implemented actions include the Notion adapter", () => {
+check("registry: implemented actions include Notion and Outlook adapters", () => {
   const implemented = ACTION_DEFINITIONS.filter((a) => a.implemented).map((a) => a.actionId);
   // Section 16 added real Gmail draft creation + send to the Section 11 calendar
   // reads; Section 17 adds the confirmation-gated calendar event writes; Section 19
@@ -170,6 +170,12 @@ check("registry: implemented actions include the Notion adapter", () => {
     "email.trash",
     "email.untrash",
     "email.updateDraft",
+    "microsoft.calendar.mutate",
+    "microsoft.mail.createDraft",
+    "microsoft.mail.deleteDraft",
+    "microsoft.mail.send",
+    "microsoft.mail.setReadState",
+    "microsoft.mail.updateDraft",
     "notion.mutate",
     "slack.mutate",
     "slack.postMessage",
@@ -275,6 +281,9 @@ check("registry: the `modify` rung is only used for reversible, non-external act
   const allowed = new Set([
     "email.modifyLabels",
     "email.untrash",
+    // Outlook isRead is one reversible mailbox-local boolean. The executor reads
+    // it back after PATCH and never affects another person or deletes content.
+    "microsoft.mail.setReadState",
     // Section 19 — the Todoist task lifecycle. Each earns the rung on the same two
     // tests the rung defines, and the reasoning is stated rather than assumed:
     //

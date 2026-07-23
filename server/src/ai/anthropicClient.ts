@@ -18,6 +18,27 @@ export interface AnthropicMessage {
   content: string;
 }
 
+export type AnthropicFailureReason =
+  | "not_configured"
+  | "invalid_request"
+  | "timeout"
+  | "network_error"
+  | "rate_limited"
+  | "provider_error"
+  | "malformed_response"
+  | "empty_response";
+
+/** A secret-safe failure that callers can classify without parsing provider text. */
+export class AnthropicClientError extends Error {
+  constructor(
+    public readonly reason: AnthropicFailureReason,
+    public readonly status?: number,
+  ) {
+    super(`anthropic_${reason}`);
+    this.name = "AnthropicClientError";
+  }
+}
+
 /** True only when an Anthropic API key is configured. */
 export function isAnthropicConfigured(): boolean {
   return Boolean(env.ANTHROPIC_API_KEY);
@@ -36,10 +57,10 @@ export async function generateAnthropicText(params: {
 }): Promise<string> {
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    throw new Error("Anthropic API key is not configured");
+    throw new AnthropicClientError("not_configured");
   }
   if (params.messages.length === 0) {
-    throw new Error("Anthropic request has no messages");
+    throw new AnthropicClientError("invalid_request");
   }
 
   const controller = new AbortController();
@@ -62,26 +83,26 @@ export async function generateAnthropicText(params: {
       signal: controller.signal,
     });
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") throw new Error("Anthropic request timed out");
-    throw error;
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new AnthropicClientError("timeout");
+    }
+    throw new AnthropicClientError("network_error");
   } finally {
     clearTimeout(timeout);
   }
 
   if (!res.ok) {
-    // Short, redacted diagnostic snippet — never includes request headers/key.
-    let detail = "";
-    try {
-      detail = (await res.text()).slice(0, 300);
-    } catch {
-      detail = "<unreadable body>";
-    }
-    throw new Error(`Anthropic request failed (${res.status}): ${detail}`);
+    // Never copy the provider response body into an exception or application log.
+    const reason = res.status === 429 ? "rate_limited" : "provider_error";
+    throw new AnthropicClientError(reason, res.status);
   }
 
-  const body = (await res.json()) as {
-    content?: { type?: string; text?: string }[];
-  };
+  let body: { content?: { type?: string; text?: string }[] };
+  try {
+    body = (await res.json()) as { content?: { type?: string; text?: string }[] };
+  } catch {
+    throw new AnthropicClientError("malformed_response", res.status);
+  }
 
   const text = (body.content ?? [])
     .filter((block) => block.type === "text" && typeof block.text === "string")
@@ -90,7 +111,7 @@ export async function generateAnthropicText(params: {
     .trim();
 
   if (!text) {
-    throw new Error("Anthropic returned an empty reply");
+    throw new AnthropicClientError("empty_response", res.status);
   }
   return text;
 }

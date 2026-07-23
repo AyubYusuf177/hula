@@ -18,6 +18,7 @@ import {
   GMAIL_PROVIDER,
   GOOGLE_CALENDAR_PROVIDER,
   GOOGLE_DRIVE_PROVIDER,
+  MICROSOFT_PROVIDER,
   NOTION_PROVIDER,
   SLACK_PROVIDER,
   TODOIST_PROVIDER,
@@ -32,8 +33,10 @@ export interface IntegrationProviderConfig {
   id: string;
   displayName: string;
   category: IntegrationCategoryId;
-  /** Real product icon (PNG) shown in the card and details sheet. */
-  iconImage: ImageSourcePropType;
+  /** Centralized product icon shown in the card and details sheet. */
+  iconImage?: ImageSourcePropType;
+  /** Code-native mark used when no raster asset is needed. */
+  brandMark?: 'microsoft';
   /** Accent color used for the connected glow/border and the icon badge. */
   accent: string;
   /** One-line capability summary shown on the card. */
@@ -59,6 +62,23 @@ export const INTEGRATION_CATEGORY_LABELS: Record<IntegrationCategoryId, string> 
 };
 
 export const INTEGRATION_PROVIDERS: readonly IntegrationProviderConfig[] = [
+  {
+    id: MICROSOFT_PROVIDER,
+    displayName: 'Microsoft 365',
+    category: 'ORGANIZATION',
+    brandMark: 'microsoft',
+    accent: '#00A4EF',
+    summary: 'One account for Outlook Mail, Calendar, Teams meetings, and OneDrive.',
+    sheetHeading: 'Microsoft 365',
+    connectedHeading: 'Microsoft 365',
+    sheetBody:
+      'Connect one Microsoft account for Outlook Mail, Outlook Calendar, calendar-based Teams meetings, and OneDrive. Hula uses only the permissions Microsoft actually grants.',
+    connectedBody:
+      'Your Microsoft account is securely connected. Hula can use the granted Outlook Mail, Outlook Calendar, calendar-based Teams meeting, and OneDrive capabilities.',
+    connectLabel: 'Connect Microsoft',
+    authorizationProviderLabel: 'Microsoft',
+    disconnectLabel: 'Disconnect Microsoft 365',
+  },
   {
     id: GOOGLE_CALENDAR_PROVIDER,
     displayName: 'Google Calendar',

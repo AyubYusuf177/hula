@@ -30,6 +30,8 @@ export interface IntegrationView {
   statusLabel: string;
   /** Safe account label (e.g. the account email), or null. */
   accountLabel: string | null;
+  /** True when connected but one or more default capabilities were not granted. */
+  partial: boolean;
 }
 
 /** Map the backend connection status to a UI state. */
@@ -93,8 +95,12 @@ export function deriveIntegrationView(
   return {
     state,
     connected: backendState === 'connected',
-    statusLabel: statusLabelFor(state),
+    statusLabel:
+      state === 'connected' && status?.partial
+        ? 'Connected with limited access'
+        : statusLabelFor(state),
     accountLabel: status?.connectedAccountName ?? status?.providerAccountEmail ?? null,
+    partial: Boolean(status?.partial),
   };
 }
 

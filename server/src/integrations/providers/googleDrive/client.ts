@@ -1,6 +1,6 @@
 import { getPrisma } from "../../../db/prisma";
 import { logger } from "../../../utils/logger";
-import { readCredentialSecrets, updateAccessToken } from "../../credentials";
+import { readCredentialSecrets, storeRefreshedCredential } from "../../credentials";
 import { TokenVaultConfigError } from "../../tokenVault";
 import {
   getGoogleDriveOAuthConfig,
@@ -177,17 +177,11 @@ async function refreshConnectionToken(
       refreshToken,
       fetchImpl,
     });
-    await updateAccessToken(
-      connectionId,
-      refreshed.accessToken,
-      refreshed.expiresIn
-        ? new Date(Date.now() + refreshed.expiresIn * 1000)
-        : null,
-    );
+    await storeRefreshedCredential(connectionId, refreshed);
     return refreshed.accessToken;
   } catch (error) {
     const invalid = error instanceof Error && /invalid_grant/i.test(error.message);
-    await markConnection(connectionId, "expired");
+    if (invalid) await markConnection(connectionId, "expired");
     throw new DriveError(invalid ? "invalid_grant" : "token_refresh_failed");
   }
 }

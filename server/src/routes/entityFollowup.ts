@@ -4,6 +4,9 @@ import { handleAsanaRead } from "../integrations/providers/asana/asanaReads";
 import { handleNotionConversation } from "../integrations/providers/notion/conversation";
 import { handleSlackConversation } from "../integrations/providers/slack/conversation";
 import { handleGoogleDriveConversation } from "../integrations/providers/googleDrive/conversation";
+import { handleOutlookMailConversation } from "../integrations/providers/microsoft/mailConversation";
+import { handleOutlookCalendarConversation } from "../integrations/providers/microsoft/calendarConversation";
+import { handleOneDriveConversation } from "../integrations/providers/microsoft/oneDriveConversation";
 import { logger } from "../utils/logger";
 import {
   isDestructiveFollowup,
@@ -48,6 +51,9 @@ export interface EntityFollowupDeps extends ArbiterDeps {
   notion?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   slack?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
   drive?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  outlook?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  outlookCalendar?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
+  oneDrive?: (userId: string, text: string | undefined) => Promise<HandlerResult>;
 }
 
 /**
@@ -124,6 +130,21 @@ export async function handleEntityFollowup(
     logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
     const result = await (deps.drive ?? ((u, t) => handleGoogleDriveConversation(u, t, { arbitrated: true })))(userId, text);
     return result.handled ? { ...result, routeSource: "drive" } : result;
+  }
+  if (owner.owner === "outlook_message" || owner.owner === "outlook_draft") {
+    logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+    const result = await (deps.outlook ?? ((u, t) => handleOutlookMailConversation(u, t, { arbitrated: true })))(userId, text);
+    return result.handled ? { ...result, routeSource: "outlookMail" } : result;
+  }
+  if (owner.owner === "outlook_calendar_event") {
+    logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+    const result = await (deps.outlookCalendar ?? ((u, t) => handleOutlookCalendarConversation(u, t, { arbitrated: true })))(userId, text);
+    return result.handled ? { ...result, routeSource: "outlookCalendar" } : result;
+  }
+  if (owner.owner === "onedrive_file") {
+    logger.info("entityFollowup routed", { owner: owner.owner, reason: owner.reason });
+    const result = await (deps.oneDrive ?? ((u, t) => handleOneDriveConversation(u, t, { arbitrated: true })))(userId, text);
+    return result.handled ? { ...result, routeSource: "oneDrive" } : result;
   }
 
   if (owner.owner !== "todoist_task") {

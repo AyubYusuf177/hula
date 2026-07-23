@@ -119,6 +119,17 @@ import {
   GOOGLE_DOC_MIME,
   type DriveCreationReceipt,
 } from "../integrations/providers/googleDrive/types";
+import {
+  executeOutlookMailMutation,
+  type OutlookMailDeps,
+} from "../integrations/providers/microsoft/mailOperations";
+import { MicrosoftGraphError } from "../integrations/providers/microsoft/graph";
+import {
+  executeOutlookCalendarMutation,
+  type OutlookCalendarDeps,
+} from "../integrations/providers/microsoft/calendarOperations";
+import { recordOutlookCalendarEntity } from "../integrations/providers/microsoft/calendarContext";
+import { invalidateOutlookDraftEntity } from "../integrations/providers/microsoft/mailContext";
 
 /**
  * Action executor (Section 12).
@@ -185,6 +196,12 @@ export interface ActionExecutionResult {
     driveWebViewLink?: string;
     /** True only for an honestly reported multi-step Google Doc partial outcome. */
     partial?: boolean;
+    /** Microsoft immutable message/draft identity and verification strength. */
+    outlookConversationId?: string;
+    /** Microsoft Graph event identity and Teams join URL after authoritative verification. */
+    microsoftEventId?: string;
+    teamsJoinUrl?: string;
+    verification?: "verified" | "accepted";
   };
 }
 
@@ -282,6 +299,18 @@ export interface ExecuteActionDeps {
   rememberSlackMutation?: typeof rememberVerifiedSlackMutation;
   createDriveFolder?: typeof createDriveFolder;
   createGoogleDoc?: typeof createGoogleDoc;
+  executeOutlookMailMutation?: (
+    userId: string,
+    input: Record<string, unknown>,
+    deps?: OutlookMailDeps,
+  ) => ReturnType<typeof executeOutlookMailMutation>;
+  executeOutlookCalendarMutation?: (
+    userId: string,
+    input: Record<string, unknown>,
+    deps?: OutlookCalendarDeps,
+  ) => ReturnType<typeof executeOutlookCalendarMutation>;
+  recordOutlookCalendarEntity?: typeof recordOutlookCalendarEntity;
+  invalidateOutlookDraftEntity?: typeof invalidateOutlookDraftEntity;
   /**
    * Waits between bounded delete-absence re-reads. Injected so tests exercise the
    * real backoff logic without spending real time.
@@ -461,6 +490,20 @@ export async function executeAction(
       );
     }
 
+    if (actionId === "microsoft.calendar.mutate") {
+      return await runOutlookCalendarAction(
+        userId,
+        input,
+        policy.provider ?? "microsoft",
+        {
+          record,
+          proposalId: options.proposalId ?? null,
+          execute: deps.executeOutlookCalendarMutation ?? executeOutlookCalendarMutation,
+          remember: deps.recordOutlookCalendarEntity ?? recordOutlookCalendarEntity,
+        },
+      );
+    }
+
     // Todoist task lifecycle (Section 19). The structured, ALREADY-RESOLVED task
     // ids and values arrive in `input` from the Todoist handler (which resolved
     // and re-fetched the targets) or from a CONFIRMED proposal. The executor
@@ -562,6 +605,27 @@ export async function executeAction(
         get:deps.getAsanaResource??getAsanaResource,
         remember:deps.recordAsanaEntity??recordAsanaEntity,
       });
+    }
+
+    if (
+      actionId === "microsoft.mail.createDraft" ||
+      actionId === "microsoft.mail.updateDraft" ||
+      actionId === "microsoft.mail.deleteDraft" ||
+      actionId === "microsoft.mail.setReadState" ||
+      actionId === "microsoft.mail.send"
+    ) {
+      return await runOutlookMailAction(
+        userId,
+        actionId,
+        input,
+        policy.provider ?? "microsoft",
+        {
+          record,
+          proposalId: options.proposalId ?? null,
+          execute: deps.executeOutlookMailMutation ?? executeOutlookMailMutation,
+          invalidateDraft: deps.invalidateOutlookDraftEntity ?? invalidateOutlookDraftEntity,
+        },
+      );
     }
 
     // Gmail CONVERSATION management (Section 17 correction). Chosen by the presence
@@ -2742,5 +2806,195 @@ async function runGmailWrite(
     else if (gmailErr && (gmailErr.reason === "insufficient_scope" || isReconnectReason(gmailErr.reason)))
       userMessage = GMAIL_EXEC_REPLIES.reconnect;
     return { ok: false, status: "failed", actionId, provider, userMessage, executionId };
+  }
+}
+
+async function runOutlookMailAction(
+  userId: string,
+  actionId:
+    | "microsoft.mail.createDraft"
+    | "microsoft.mail.updateDraft"
+    | "microsoft.mail.deleteDraft"
+    | "microsoft.mail.setReadState"
+    | "microsoft.mail.send",
+  input: Record<string, unknown> | undefined,
+  provider: string,
+  ctx: {
+    record: typeof recordActionExecution;
+    proposalId: string | null;
+    execute: typeof executeOutlookMailMutation;
+    invalidateDraft: typeof invalidateOutlookDraftEntity;
+  },
+): Promise<ActionExecutionResult> {
+  const operation = readStr(input, "operation");
+  const fail = async (reason: string, userMessage: string): Promise<ActionExecutionResult> => {
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { operation, inputKeys: Object.keys(input ?? {}) },
+      errorMessage: reason,
+    });
+    return { ok: false, status: "failed", actionId, provider, userMessage, executionId };
+  };
+  if (!input || !operation) {
+    return fail("invalid_input", "I’m missing the exact Outlook message details, so I didn’t change anything.");
+  }
+  try {
+    const receipt = await ctx.execute(userId, input);
+    if ((operation === "delete_draft" || operation === "send_draft") && receipt.draftId) {
+      await ctx.invalidateDraft(userId, receipt.draftId);
+    }
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "succeeded",
+      requestSummary: { operation },
+      resultSummary: {
+        operation: receipt.operation,
+        verification: receipt.verification,
+        hasMessageReceipt: Boolean(receipt.messageId),
+        hasDraftReceipt: Boolean(receipt.draftId),
+      },
+    });
+    let userMessage: string;
+    if (actionId === "microsoft.mail.createDraft") {
+      userMessage = "Draft created in Outlook.";
+    } else if (actionId === "microsoft.mail.updateDraft") {
+      userMessage = "Updated the Outlook draft.";
+    } else if (actionId === "microsoft.mail.deleteDraft") {
+      userMessage = "Deleted the Outlook draft.";
+    } else if (actionId === "microsoft.mail.setReadState") {
+      userMessage = receipt.isRead ? "Marked the Outlook message as read." : "Marked the Outlook message as unread.";
+    } else if (receipt.verification === "verified") {
+      userMessage = operation === "reply" || operation === "reply_all"
+        ? "Sent the reply from your Outlook account."
+        : operation === "forward"
+          ? "Forwarded it from your Outlook account."
+          : "Sent it from your Outlook account.";
+    } else {
+      userMessage = "Microsoft accepted the message for sending. I couldn’t yet confirm it in Sent Items, so I won’t claim delivery.";
+    }
+    return {
+      ok: true,
+      status: "succeeded",
+      actionId,
+      provider,
+      userMessage,
+      executionId,
+      receipt: {
+        ...(receipt.draftId ? { draftId: receipt.draftId } : {}),
+        ...(receipt.messageId ? { messageId: receipt.messageId } : {}),
+        ...(receipt.conversationId ? { outlookConversationId: receipt.conversationId } : {}),
+        verification: receipt.verification,
+      },
+    };
+  } catch (error) {
+    const graph = error instanceof MicrosoftGraphError ? error : null;
+    logger.error("action.outlookMail failed", {
+      actionId,
+      operation,
+      errorCode: graph?.reason ?? "unknown",
+      httpStatus: graph?.httpStatus ?? null,
+    });
+    let userMessage = "I couldn’t verify that Outlook change, so I won’t say it succeeded.";
+    if (graph?.reason === "not_connected") userMessage = "Connect Microsoft 365 in Hula first, then I can do that.";
+    else if (graph?.reason === "reconnect_required" || graph?.reason === "insufficient_capability" || graph?.reason === "permission_denied") {
+      userMessage = "Reconnect Microsoft 365 in Hula and grant Outlook Mail access before I can do that.";
+    } else if (graph?.reason === "rate_limited") {
+      userMessage = "Outlook is rate-limiting requests right now. I didn’t retry the write; please check your mailbox before trying again.";
+    } else if (actionId === "microsoft.mail.send" && (graph?.reason === "timeout" || graph?.reason === "network_failure")) {
+      userMessage = "The Outlook send result is uncertain. I haven’t tried again because that could send twice—please check Sent Items first.";
+    }
+    return fail(graph?.reason ?? "execution_failed", userMessage);
+  }
+}
+
+async function runOutlookCalendarAction(
+  userId: string,
+  input: Record<string, unknown> | undefined,
+  provider: string,
+  ctx: {
+    record: typeof recordActionExecution;
+    proposalId: string | null;
+    execute: typeof executeOutlookCalendarMutation;
+    remember: typeof recordOutlookCalendarEntity;
+  },
+): Promise<ActionExecutionResult> {
+  const actionId = "microsoft.calendar.mutate";
+  const operation = readStr(input, "operation");
+  const fail = async (reason: string, userMessage: string): Promise<ActionExecutionResult> => {
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "failed",
+      requestSummary: { operation, inputKeys: Object.keys(input ?? {}) },
+      errorMessage: reason,
+    });
+    return { ok: false, status: "failed", actionId, provider, userMessage, executionId };
+  };
+  if (!input || !operation) return fail("invalid_input", "I’m missing the exact Outlook event details, so I didn’t change anything.");
+  try {
+    const receipt = await ctx.execute(userId, input);
+    if (receipt.event) await ctx.remember(userId, receipt.event);
+    const executionId = await ctx.record(userId, {
+      proposalId: ctx.proposalId,
+      provider,
+      actionId,
+      status: "succeeded",
+      requestSummary: { operation },
+      resultSummary: {
+        operation,
+        verification: receipt.verification,
+        hasEventReceipt: true,
+        hasTeamsJoinUrl: Boolean(receipt.event?.teamsJoinUrl),
+      },
+    });
+    const userMessage = operation === "delete"
+      ? "Cancelled the Outlook calendar event and verified it is gone."
+      : operation === "create"
+        ? receipt.event?.teamsJoinUrl
+          ? `Created the Outlook event with a verified Teams link: ${receipt.event.teamsJoinUrl}`
+          : input.teamsMeeting === true
+            ? "Microsoft created the event but did not return a Teams join URL, so I won’t claim one exists."
+            : "Created the Outlook calendar event and verified it."
+        : receipt.event?.teamsJoinUrl && input.teamsMeeting === true
+          ? `Updated the Outlook event with a verified Teams link: ${receipt.event.teamsJoinUrl}`
+          : input.teamsMeeting === true
+            ? "Microsoft kept the Outlook event but did not return a Teams join URL, so I won’t claim one exists."
+            : "Updated the Outlook calendar event and verified the change.";
+    return {
+      ok: true,
+      status: "succeeded",
+      actionId,
+      provider,
+      userMessage,
+      executionId,
+      receipt: {
+        microsoftEventId: receipt.eventId,
+        ...(receipt.event?.teamsJoinUrl ? { teamsJoinUrl: receipt.event.teamsJoinUrl } : {}),
+        verification: "verified",
+      },
+    };
+  } catch (error) {
+    const graph = error instanceof MicrosoftGraphError ? error : null;
+    logger.error("action.outlookCalendar failed", {
+      operation,
+      errorCode: graph?.reason ?? "unknown",
+      httpStatus: graph?.httpStatus ?? null,
+    });
+    let message = "I couldn’t verify that Outlook Calendar change, so I won’t say it succeeded.";
+    if (graph?.reason === "not_connected") message = "Connect Microsoft 365 in Hula first, then I can do that.";
+    else if (graph?.reason === "reconnect_required" || graph?.reason === "insufficient_capability" || graph?.reason === "permission_denied") {
+      message = "Reconnect Microsoft 365 in Hula and grant Outlook Calendar access before I can do that.";
+    } else if (input.teamsMeeting === true && (graph?.reason === "invalid_request" || graph?.reason === "unsupported_account")) {
+      message = "This Microsoft account or tenant did not allow Teams meeting creation. I didn’t fabricate a join link.";
+    } else if (graph?.reason === "timeout" || graph?.reason === "network_failure" || graph?.reason === "rate_limited") {
+      message = "The Outlook Calendar result is uncertain. I didn’t retry the write because that could create or change it twice—please check the calendar first.";
+    }
+    return fail(graph?.reason ?? "execution_failed", message);
   }
 }

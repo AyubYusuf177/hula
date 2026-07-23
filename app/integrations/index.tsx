@@ -34,6 +34,7 @@ import {
   connectTodoist,
   connectNotion,
   connectSlack,
+  connectMicrosoft,
   disconnectGmail,
   disconnectAsana,
   disconnectGoogleCalendar,
@@ -41,6 +42,7 @@ import {
   disconnectTodoist,
   disconnectNotion,
   disconnectSlack,
+  disconnectMicrosoft,
   fetchUserIntegrations,
   GMAIL_PROVIDER,
   ASANA_PROVIDER,
@@ -58,6 +60,8 @@ import {
   SLACK_PROVIDER,
   SlackNotConfiguredError,
   SlackConnectError,
+  MICROSOFT_PROVIDER,
+  MicrosoftNotConfiguredError,
   type IntegrationStatus,
 } from '@/lib/hulaApi';
 import {
@@ -106,6 +110,8 @@ const CONNECT_STARTERS: Record<string, ConnectStarter | undefined> = {
   [ASANA_PROVIDER]: (token, appReturnUrl) => connectAsana(token, { appReturnUrl }),
   [NOTION_PROVIDER]: (token, appReturnUrl) => connectNotion(token, { appReturnUrl }),
   [SLACK_PROVIDER]: (token, appReturnUrl) => connectSlack(token, { appReturnUrl }),
+  [MICROSOFT_PROVIDER]: (token, appReturnUrl) =>
+    connectMicrosoft(token, { appReturnUrl }),
 };
 
 const DISCONNECTERS: Record<
@@ -119,6 +125,7 @@ const DISCONNECTERS: Record<
   [ASANA_PROVIDER]: disconnectAsana,
   [NOTION_PROVIDER]: disconnectNotion,
   [SLACK_PROVIDER]: disconnectSlack,
+  [MICROSOFT_PROVIDER]: disconnectMicrosoft,
 };
 
 type StatusMap = Record<string, IntegrationStatus | null>;
@@ -343,11 +350,14 @@ export default function IntegrationsScreen() {
         || err instanceof AsanaNotConfiguredError
         || err instanceof NotionNotConfiguredError
         || err instanceof SlackNotConfiguredError
+        || err instanceof MicrosoftNotConfiguredError
           ? 'This connection isn’t available yet. Please try again later.'
           : err instanceof SlackConnectError
             ? slackConnectErrorMessage(err)
             : err instanceof OAuthSessionCancelledError
-              ? 'Slack connection was cancelled. Nothing changed.'
+              ? providerId === SLACK_PROVIDER
+                ? 'Slack connection was cancelled. Nothing changed.'
+                : 'Connection was cancelled. Nothing changed.'
           : err instanceof MissingApiUrlError
             ? 'Hula backend URL is not configured.'
             : 'Couldn’t start the connection. Please try again.';

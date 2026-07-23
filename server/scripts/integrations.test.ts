@@ -49,6 +49,7 @@ check("registry: contains the expected providers", () => {
   const ids = listIntegrationCatalog().map((p) => p.provider);
   for (const expected of [
     "google_calendar",
+    "microsoft",
     "gmail",
     "zoom",
     "notion",

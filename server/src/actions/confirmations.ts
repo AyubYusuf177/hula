@@ -5,6 +5,7 @@ import {
   confirmProposal,
   finalizeProposal,
   getActiveProposal,
+  getRecentResolvedProposal,
   rejectProposal,
 } from "./proposals";
 
@@ -74,6 +75,7 @@ export interface ConfirmationResult {
  */
 export interface ConfirmationDeps {
   getActiveProposal?: typeof getActiveProposal;
+  getRecentResolvedProposal?: typeof getRecentResolvedProposal;
   confirmProposal?: typeof confirmProposal;
   rejectProposal?: typeof rejectProposal;
   finalizeProposal?: typeof finalizeProposal;
@@ -99,6 +101,7 @@ export async function handleActionConfirmation(
   if (reply === "none") return { handled: false };
 
   const loadActive = deps.getActiveProposal ?? getActiveProposal;
+  const loadRecentResolved = deps.getRecentResolvedProposal ?? getRecentResolvedProposal;
   const confirm = deps.confirmProposal ?? confirmProposal;
   const reject = deps.rejectProposal ?? rejectProposal;
   const finalize = deps.finalizeProposal ?? finalizeProposal;
@@ -106,8 +109,17 @@ export async function handleActionConfirmation(
 
   try {
     const active = await loadActive(userId);
-    // A "yes"/"no" with no pending proposal (or an expired one) must do nothing.
-    if (!active) return { handled: false };
+    if (!active) {
+      const recent = await loadRecentResolved(userId);
+      if (!recent) return { handled: false };
+      if (recent.status === "executed") {
+        return { handled: true, outcome: "none", reply: "That action was already completed." };
+      }
+      if (recent.status === "rejected" || recent.status === "cancelled") {
+        return { handled: true, outcome: "none", reply: "That action was already cancelled." };
+      }
+      return { handled: true, outcome: "none", reply: "That action was already handled but didn’t complete." };
+    }
 
     if (reply === "cancel") {
       await reject(userId, active.id);

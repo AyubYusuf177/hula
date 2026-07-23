@@ -60,6 +60,9 @@ export interface IntegrationStatusItem {
   connectedAccountName: string | null;
   connectedAt: string | null;
   lastSyncedAt: string | null;
+  grantedCapabilities: string[];
+  missingCapabilities: string[];
+  partial: boolean;
   configured?: boolean;
 }
 
@@ -156,11 +159,17 @@ export function toIntegrationStatusItem(
     category: ProviderCategory;
     status: ProviderStatus;
     authType: ProviderAuthType;
+    requiredCapabilities?: readonly string[];
   },
   conn: IntegrationConnectionView | undefined,
   configured = true,
 ): IntegrationStatusItem {
   const status = conn?.status ?? "disconnected";
+  const grantedCapabilities = conn?.capabilities ?? [];
+  const granted = new Set(grantedCapabilities);
+  const missingCapabilities = (entry.requiredCapabilities ?? []).filter(
+    (capability) => !granted.has(capability),
+  );
   return {
     provider: entry.provider,
     displayName: entry.displayName,
@@ -173,6 +182,9 @@ export function toIntegrationStatusItem(
     connectedAccountName: conn?.displayName ?? null,
     connectedAt: conn?.connectedAt ?? null,
     lastSyncedAt: conn?.lastSyncedAt ?? null,
+    grantedCapabilities,
+    missingCapabilities,
+    partial: status === "connected" && missingCapabilities.length > 0,
     ...(configured ? {} : { configured: false }),
   };
 }
@@ -203,6 +215,13 @@ export async function getUserIntegrationStatus(
                 env.GOOGLE_DRIVE_OAUTH_REDIRECT_URI &&
                 env.INTEGRATION_TOKEN_ENCRYPTION_KEY,
               )
+            : entry.provider === "microsoft"
+              ? Boolean(
+                  env.MICROSOFT_OAUTH_CLIENT_ID &&
+                  env.MICROSOFT_OAUTH_CLIENT_SECRET &&
+                  env.MICROSOFT_OAUTH_REDIRECT_URI &&
+                  env.INTEGRATION_TOKEN_ENCRYPTION_KEY,
+                )
             : true;
       return toIntegrationStatusItem(entry,byProvider.get(entry.provider),configured);
     });

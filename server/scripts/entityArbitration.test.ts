@@ -279,8 +279,10 @@ async function run(): Promise<void> {
     // treating them as Todoist vocabulary would steal Asana follow-ups.
     assert.deepEqual(explicitEntityKinds("complete it"), []);
     assert.deepEqual(explicitEntityKinds("move it to my project"), ["todoist_task"]);
-    assert.deepEqual(explicitEntityKinds("change the second draft's body"), ["gmail_draft"]);
-    assert.deepEqual(explicitEntityKinds("reply to the second one"), ["gmail_email"]);
+    assert.deepEqual(explicitEntityKinds("change the second draft's body"), []);
+    assert.deepEqual(explicitEntityKinds("reply to the second one"), []);
+    assert.deepEqual(explicitEntityKinds("change the second Gmail draft's body"), ["gmail_draft"]);
+    assert.deepEqual(explicitEntityKinds("reply to the second Outlook email"), ["outlook_message"]);
     assert.deepEqual(explicitEntityKinds("move the second meeting"), ["calendar_event"]);
     // THE ROOT CAUSE: a bare verb must imply nothing at all.
     for (const t of ["change the second one", "move it", "delete the first one", "it"]) {

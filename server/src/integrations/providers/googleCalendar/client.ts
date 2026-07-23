@@ -1,7 +1,7 @@
 import { getPrisma } from "../../../db/prisma";
 import { logger } from "../../../utils/logger";
 import { TokenVaultConfigError } from "../../tokenVault";
-import { readCredentialSecrets, updateAccessToken } from "../../credentials";
+import { readCredentialSecrets, storeRefreshedCredential } from "../../credentials";
 import {
   getGoogleOAuthConfig,
   refreshAccessToken,
@@ -323,10 +323,7 @@ async function refreshConnectionAccessToken(
   try {
     const config = getGoogleOAuthConfig();
     const refreshed = await refreshAccessToken({ config, refreshToken, fetchImpl });
-    const newExpiry = refreshed.expiresIn
-      ? new Date(Date.now() + refreshed.expiresIn * 1000)
-      : null;
-    await updateAccessToken(connectionId, refreshed.accessToken, newExpiry);
+    await storeRefreshedCredential(connectionId, refreshed);
     return refreshed.accessToken;
   } catch (err) {
     const message = err instanceof Error ? err.message : "";
@@ -334,7 +331,7 @@ async function refreshConnectionAccessToken(
     const reason: GoogleCalendarErrorReason = isInvalidGrant
       ? "invalid_grant"
       : "token_refresh_failed";
-    await markConnection(connectionId, "expired");
+    if (isInvalidGrant) await markConnection(connectionId, "expired");
     // Redacted — never surface the underlying token/secret detail.
     logProviderError("token.refresh", new GoogleCalendarError(reason), connectionId);
     throw new GoogleCalendarError(reason, "Failed to refresh Google access token");

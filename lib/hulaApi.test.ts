@@ -57,6 +57,9 @@ async function main(): Promise<void> {
     fetchGmailMessages,
     GmailNotConfiguredError,
     GMAIL_PROVIDER,
+    connectMicrosoft,
+    MicrosoftNotConfiguredError,
+    MICROSOFT_PROVIDER,
   } = await import('./hulaApi');
 
   await check('connect: POSTs to the provider connect endpoint with a Clerk bearer', async () => {
@@ -127,6 +130,35 @@ async function main(): Promise<void> {
     assert.equal(call.method ?? 'GET', 'GET');
     assert.equal(call.url, `https://hula.test/v1/me/integrations/${GMAIL_PROVIDER}/messages?limit=5`);
     assert.deepEqual(res.messages, []);
+  });
+
+  await check('microsoft: unified connect POSTs to the Microsoft provider endpoint', async () => {
+    const getCalls = stubFetch({
+      ok: true,
+      status: 200,
+      json: {
+        provider: MICROSOFT_PROVIDER,
+        authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?x=1',
+        expiresAt: '2026-07-21T00:10:00Z',
+      },
+    });
+    const result = await connectMicrosoft('clerk-microsoft', {
+      appReturnUrl: 'hulaai://integrations',
+    });
+    const [call] = getCalls();
+    assert.equal(call.method, 'POST');
+    assert.equal(
+      call.url,
+      `https://hula.test/v1/me/integrations/${MICROSOFT_PROVIDER}/connect`,
+    );
+    assert.equal(call.headers.Authorization, 'Bearer clerk-microsoft');
+    assert.deepEqual(call.body, { appReturnUrl: 'hulaai://integrations' });
+    assert.match(result.authorizationUrl, /login\.microsoftonline\.com\/common/);
+  });
+
+  await check('microsoft: a 400 maps to MicrosoftNotConfiguredError', async () => {
+    stubFetch({ ok: false, status: 400, json: { error: 'microsoft_not_configured' } });
+    await assert.rejects(connectMicrosoft('t'), MicrosoftNotConfiguredError);
   });
 
   console.log(`\nAll ${passed} Hula API tests passed.`);

@@ -211,6 +211,9 @@ export interface IntegrationStatus {
   connectedAccountName?: string | null;
   connectedAt: string | null;
   lastSyncedAt: string | null;
+  grantedCapabilities?: string[];
+  missingCapabilities?: string[];
+  partial?: boolean;
   configured?: boolean;
 }
 
@@ -293,6 +296,57 @@ export async function disconnectIntegration(
 
   return (await res.json()) as { ok: boolean; changed: boolean };
 }
+
+// --- Microsoft 365 (Section 24 Phase 1) ----------------------------------
+
+export const MICROSOFT_PROVIDER = 'microsoft';
+
+export class MicrosoftNotConfiguredError extends Error {
+  constructor() {
+    super('Microsoft 365 connect is not configured on the Hula backend yet.');
+    this.name = 'MicrosoftNotConfiguredError';
+  }
+}
+
+export interface MicrosoftConnectResponse {
+  provider: string;
+  authorizationUrl: string;
+  expiresAt: string;
+}
+
+/** Start unified Microsoft OAuth. The mobile app never receives Graph tokens. */
+export async function connectMicrosoft(
+  token: string,
+  params: { appReturnUrl?: string } = {},
+): Promise<MicrosoftConnectResponse> {
+  if (!BASE_URL) throw new MissingApiUrlError();
+  const res = await fetch(
+    `${BASE_URL}/v1/me/integrations/${MICROSOFT_PROVIDER}/connect`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(
+        params.appReturnUrl ? { appReturnUrl: params.appReturnUrl } : {},
+      ),
+    },
+  );
+  if (res.status === 400) throw new MicrosoftNotConfiguredError();
+  if (!res.ok) throw new Error(`microsoft/connect failed (${res.status})`);
+  const data = (await res.json()) as Partial<MicrosoftConnectResponse>;
+  if (typeof data.authorizationUrl !== 'string' || !data.authorizationUrl) {
+    throw new Error('microsoft/connect returned no authorization URL');
+  }
+  return data as MicrosoftConnectResponse;
+}
+
+export const fetchMicrosoftStatus = (token: string) =>
+  fetchIntegrationStatus(token, MICROSOFT_PROVIDER);
+
+export const disconnectMicrosoft = (token: string) =>
+  disconnectIntegration(token, MICROSOFT_PROVIDER);
 
 // --- Google Calendar (Section 13) -----------------------------------------
 //

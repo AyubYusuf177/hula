@@ -76,6 +76,13 @@ const envSchema = z.object({
   GOOGLE_DRIVE_OAUTH_REDIRECT_URI: z.string().optional(),
   GOOGLE_DRIVE_SCOPES: z.string().optional(),
 
+  // Unified Microsoft 365 OAuth (Section 24 Phase 1). The app registration is a
+  // confidential web client; the secret remains backend-only. Scopes are fixed
+  // in the provider catalog and cannot be widened through environment config.
+  MICROSOFT_OAUTH_CLIENT_ID: z.string().optional(),
+  MICROSOFT_OAUTH_CLIENT_SECRET: z.string().optional(),
+  MICROSOFT_OAUTH_REDIRECT_URI: z.string().url().optional(),
+
   // Todoist OAuth (Section 19) — all OPTIONAL. Todoist is its own OAuth app with
   // its own client id/secret and redirect URI (it does NOT share Google's). All
   // are required only when a user actually starts the Todoist connect flow; a
